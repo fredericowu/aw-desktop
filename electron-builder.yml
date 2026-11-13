@@ -1,0 +1,31 @@
+appId: com.fredericowu.awdesktop
+productName: AW Desktop
+directories:
+  output: dist
+  buildResources: build
+files:
+  - out/**/*
+asarUnpack:
+  - out/renderer/**/*
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - dmg
+    - zip
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  # Developer ID Application cert, not Apple Distribution — this app is
+  # notarized direct-download, never Mac App Store (Architect card
+  # 4175bf3b-9510-8104-8c21-f5008b4d708b §3/§4). electron-builder reads the
+  # cert from CSC_LINK/CSC_KEY_PASSWORD (base64 .p12 + its password), same
+  # "secret holds the credential, CI decodes it" shape as
+  # aw-meta-glasses-2's ASC_KEY_CONTENT_B64 — see .github/workflows/release.yml.
+afterSign: build/notarize.js
+dmg:
+  sign: false
+publish:
+  provider: github
+  owner: fredericowu
+  repo: aw-desktop

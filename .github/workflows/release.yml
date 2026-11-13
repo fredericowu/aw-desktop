@@ -1,0 +1,56 @@
+name: macOS Release
+
+# Needs a REAL macOS runner for code signing + notarization — unlike this
+# org's Linux bare-metal CI runners, GitHub-hosted macOS is used here on
+# purpose (same reasoning as aw-meta-glasses-2's ios.yml).
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: aw-desktop-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 40
+    env:
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_CONTENT_B64: ${{ secrets.ASC_KEY_CONTENT_B64 }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      CSC_LINK: ${{ secrets.CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Write App Store Connect API key
+        if: env.ASC_KEY_CONTENT_B64 != ''
+        run: |
+          mkdir -p "$RUNNER_TEMP/asc"
+          printf '%s' "$ASC_KEY_CONTENT_B64" | base64 --decode > "$RUNNER_TEMP/asc/AuthKey.p8"
+          echo "ASC_KEY_PATH=$RUNNER_TEMP/asc/AuthKey.p8" >> "$GITHUB_ENV"
+
+      - name: Build + package
+        # Publishes straight to the GitHub Release (feeding electron-updater)
+        # once CSC_LINK proves signing is actually configured; otherwise
+        # builds locally-only so an unsigned run still produces artifacts
+        # instead of failing on a push with no secrets yet.
+        run: npm run build && npx electron-builder --mac --publish ${{ env.CSC_LINK != '' && 'always' || 'never' }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: aw-desktop-${{ env.CSC_LINK != '' && 'signed' || 'unsigned' }}
+          path: dist/*.dmg
