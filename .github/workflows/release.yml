@@ -95,8 +95,26 @@ jobs:
         run: |
           openssl pkcs12 -in "$RUNNER_TEMP/csc/cert.p12" -nodes -passin "pass:$CSC_KEY_PASSWORD" -out "$RUNNER_TEMP/csc/combined.pem"
           openssl pkcs12 -export -in "$RUNNER_TEMP/csc/combined.pem" -out "$RUNNER_TEMP/csc/cert-legacy.p12" -passout "pass:$CSC_KEY_PASSWORD" -name "Developer ID Application"
+          echo "cert count in combined.pem: $(grep -c 'BEGIN CERTIFICATE' "$RUNNER_TEMP/csc/combined.pem")"
+          for n in $(seq 1 $(grep -c 'BEGIN CERTIFICATE' "$RUNNER_TEMP/csc/combined.pem")); do
+            awk "/BEGIN CERTIFICATE/{c++} c==$n" "$RUNNER_TEMP/csc/combined.pem" | openssl x509 -noout -subject -issuer
+          done
           rm -f "$RUNNER_TEMP/csc/combined.pem"
           echo "CSC_LINK=$RUNNER_TEMP/csc/cert-legacy.p12" >> "$GITHUB_ENV"
+
+      - name: TEMP debug - keychain identity check
+        if: env.CSC_LINK_RAW != ''
+        run: |
+          KC="$RUNNER_TEMP/csc/debug.keychain"
+          security create-keychain -p tmp123 "$KC"
+          security unlock-keychain -p tmp123 "$KC"
+          security import "$RUNNER_TEMP/csc/cert-legacy.p12" -k "$KC" -T /usr/bin/codesign -T /usr/bin/productbuild -P "$CSC_KEY_PASSWORD"
+          security set-key-partition-list -S apple-tool:,apple: -s -k tmp123 "$KC"
+          echo "--- find-identity -v (all) ---"
+          security find-identity -v "$KC" || true
+          echo "--- find-identity -v -p codesigning ---"
+          security find-identity -v -p codesigning "$KC" || true
+          security delete-keychain "$KC" || true
 
       - name: Build + package
         # Always publishes to the GitHub Release on a tag push — signing
