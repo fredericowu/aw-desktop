@@ -62,8 +62,20 @@ jobs:
         # skipping signing. GitHub interpolates a missing secret to "",
         # not absent, so CSC_LINK must only ever be exported into the
         # real environment when the secret is genuinely non-empty.
+        #
+        # Decode straight to a file rather than writing the raw base64
+        # into $GITHUB_ENV (same pattern as the ASC key above) — the
+        # single-line KEY=VALUE format of $GITHUB_ENV silently truncates
+        # at the first embedded newline, and plain `base64` (unlike
+        # `base64 -w0`) wraps its output every 76 chars. A truncated
+        # base64 blob decodes to a corrupted .p12 that fails PKCS12
+        # import with a "MAC verification failed (wrong password?)"
+        # error indistinguishable from an actually-wrong password.
         if: env.CSC_LINK_RAW != ''
-        run: echo "CSC_LINK=$CSC_LINK_RAW" >> "$GITHUB_ENV"
+        run: |
+          mkdir -p "$RUNNER_TEMP/csc"
+          printf '%s' "$CSC_LINK_RAW" | base64 --decode > "$RUNNER_TEMP/csc/cert.p12"
+          echo "CSC_LINK=$RUNNER_TEMP/csc/cert.p12" >> "$GITHUB_ENV"
 
       - name: Build + package
         # Always publishes to the GitHub Release on a tag push — signing
