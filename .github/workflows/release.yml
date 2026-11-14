@@ -33,11 +33,21 @@ jobs:
       CSC_LINK_RAW: ${{ secrets.CSC_LINK }}
       CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # Belt-and-suspenders: guards electron-builder from trying to
-      # auto-discover a signing identity from the runner's empty keychain.
-      # Only governs keychain auto-discovery, not an explicitly-exported
-      # CSC_LINK above — safe to leave on once real signing is added.
-      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      # CSC_IDENTITY_AUTO_DISCOVERY=false does NOT just disable discovering
+      # a stray identity in an otherwise-empty keychain — electron-builder's
+      # findIdentity() (app-builder-lib macCodeSign.js) returns null
+      # WITHOUT EVER CALLING `security find-identity` whenever this is
+      # "false" and no CSC_NAME is set, even for a certificate explicitly
+      # imported from CSC_LINK. Verified live (run 43588646501, card
+      # 4185bf3b-9510-81b7-bc0b-e515a9dad5dd): a real, valid, correctly-
+      # chained Developer ID cert from CSC_LINK was imported successfully,
+      # manually confirmed found by `security find-identity -v -p
+      # codesigning`, yet electron-builder still logged "skipped macOS
+      # application code signing" and produced an unsigned build — because
+      # this flag short-circuits identity lookup before it ever inspects
+      # the keychain. So it must track whether CSC_LINK actually has a
+      # cert for electron-builder to find, not stay hardcoded "false".
+      CSC_IDENTITY_AUTO_DISCOVERY: ${{ secrets.CSC_LINK != '' && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -95,26 +105,8 @@ jobs:
         run: |
           openssl pkcs12 -in "$RUNNER_TEMP/csc/cert.p12" -nodes -passin "pass:$CSC_KEY_PASSWORD" -out "$RUNNER_TEMP/csc/combined.pem"
           openssl pkcs12 -export -in "$RUNNER_TEMP/csc/combined.pem" -out "$RUNNER_TEMP/csc/cert-legacy.p12" -passout "pass:$CSC_KEY_PASSWORD" -name "Developer ID Application"
-          echo "cert count in combined.pem: $(grep -c 'BEGIN CERTIFICATE' "$RUNNER_TEMP/csc/combined.pem")"
-          for n in $(seq 1 $(grep -c 'BEGIN CERTIFICATE' "$RUNNER_TEMP/csc/combined.pem")); do
-            awk "/BEGIN CERTIFICATE/{c++} c==$n" "$RUNNER_TEMP/csc/combined.pem" | openssl x509 -noout -subject -issuer
-          done
           rm -f "$RUNNER_TEMP/csc/combined.pem"
           echo "CSC_LINK=$RUNNER_TEMP/csc/cert-legacy.p12" >> "$GITHUB_ENV"
-
-      - name: TEMP debug - keychain identity check
-        if: env.CSC_LINK_RAW != ''
-        run: |
-          KC="$RUNNER_TEMP/csc/debug.keychain"
-          security create-keychain -p tmp123 "$KC"
-          security unlock-keychain -p tmp123 "$KC"
-          security import "$RUNNER_TEMP/csc/cert-legacy.p12" -k "$KC" -T /usr/bin/codesign -T /usr/bin/productbuild -P "$CSC_KEY_PASSWORD"
-          security set-key-partition-list -S apple-tool:,apple: -s -k tmp123 "$KC"
-          echo "--- find-identity -v (all) ---"
-          security find-identity -v "$KC" || true
-          echo "--- find-identity -v -p codesigning ---"
-          security find-identity -v -p codesigning "$KC" || true
-          security delete-keychain "$KC" || true
 
       - name: Build + package
         # Always publishes to the GitHub Release on a tag push — signing
