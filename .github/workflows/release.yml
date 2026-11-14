@@ -30,7 +30,7 @@ jobs:
       ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
       ASC_KEY_CONTENT_B64: ${{ secrets.ASC_KEY_CONTENT_B64 }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      CSC_LINK: ${{ secrets.CSC_LINK }}
+      CSC_LINK_RAW: ${{ secrets.CSC_LINK }}
       CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -49,6 +49,16 @@ jobs:
           mkdir -p "$RUNNER_TEMP/asc"
           printf '%s' "$ASC_KEY_CONTENT_B64" | base64 --decode > "$RUNNER_TEMP/asc/AuthKey.p8"
           echo "ASC_KEY_PATH=$RUNNER_TEMP/asc/AuthKey.p8" >> "$GITHUB_ENV"
+
+      - name: Export code-signing certificate
+        # electron-builder's getCscLink() treats an EMPTY CSC_LINK as an
+        # explicit (if useless) file path, not "unset" — it resolves to
+        # the repo root and crashes with "<cwd> not a file" instead of
+        # skipping signing. GitHub interpolates a missing secret to "",
+        # not absent, so CSC_LINK must only ever be exported into the
+        # real environment when the secret is genuinely non-empty.
+        if: env.CSC_LINK_RAW != ''
+        run: echo "CSC_LINK=$CSC_LINK_RAW" >> "$GITHUB_ENV"
 
       - name: Build + package
         # Always publishes to the GitHub Release on a tag push — signing
