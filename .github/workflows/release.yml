@@ -77,6 +77,21 @@ jobs:
           printf '%s' "$CSC_LINK_RAW" | base64 --decode > "$RUNNER_TEMP/csc/cert.p12"
           echo "CSC_LINK=$RUNNER_TEMP/csc/cert.p12" >> "$GITHUB_ENV"
 
+      - name: TEMP debug - cert.p12 sanity check
+        # One-off diagnostic for the signing-credential investigation on
+        # card 4185bf3b-9510-81b7-bc0b-e515a9dad5dd — reveals only size,
+        # a hash, and openssl's own (non-secret) diagnostic text, never
+        # the secret content itself. Remove once resolved.
+        if: env.CSC_LINK_RAW != ''
+        run: |
+          echo "cert.p12 size: $(wc -c < "$RUNNER_TEMP/csc/cert.p12") bytes"
+          echo "cert.p12 sha256: $(shasum -a 256 "$RUNNER_TEMP/csc/cert.p12" | awk '{print $1}')"
+          echo "cert.p12 first 16 bytes (hex): $(head -c 16 "$RUNNER_TEMP/csc/cert.p12" | xxd -p | tr -d '\n')"
+          echo "CSC_KEY_PASSWORD length: ${#CSC_KEY_PASSWORD}"
+          openssl pkcs12 -in "$RUNNER_TEMP/csc/cert.p12" -info -noout -passin "pass:$CSC_KEY_PASSWORD" -legacy 2>&1 || true
+          echo "--- retry without -legacy ---"
+          openssl pkcs12 -in "$RUNNER_TEMP/csc/cert.p12" -info -noout -passin "pass:$CSC_KEY_PASSWORD" 2>&1 || true
+
       - name: Build + package
         # Always publishes to the GitHub Release on a tag push — signing
         # (CSC_LINK) and notarization (ASC_*) stay independently gated
