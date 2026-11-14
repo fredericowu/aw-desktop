@@ -33,6 +33,11 @@ jobs:
       CSC_LINK_RAW: ${{ secrets.CSC_LINK }}
       CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Belt-and-suspenders: guards electron-builder from trying to
+      # auto-discover a signing identity from the runner's empty keychain.
+      # Only governs keychain auto-discovery, not an explicitly-exported
+      # CSC_LINK above — safe to leave on once real signing is added.
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
     steps:
       - uses: actions/checkout@v4
 
