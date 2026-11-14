@@ -5,6 +5,10 @@ directories:
   buildResources: build
 files:
   - out/**/*
+protocols:
+  name: AW Desktop
+  schemes:
+    - awdesktop
 asarUnpack:
   - out/renderer/**/*
 mac:
