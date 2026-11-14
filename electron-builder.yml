@@ -8,6 +8,7 @@ files:
 asarUnpack:
   - out/renderer/**/*
 mac:
+  icon: build/icon.icns
   category: public.app-category.developer-tools
   target:
     - dmg
@@ -26,6 +27,7 @@ afterSign: build/notarize.js
 dmg:
   sign: false
 win:
+  icon: build/icon.ico
   target:
     - nsis
   artifactName: "${productName}-Setup-${version}.${ext}"
