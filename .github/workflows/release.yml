@@ -75,22 +75,28 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/csc"
           printf '%s' "$CSC_LINK_RAW" | base64 --decode > "$RUNNER_TEMP/csc/cert.p12"
-          echo "CSC_LINK=$RUNNER_TEMP/csc/cert.p12" >> "$GITHUB_ENV"
 
-      - name: TEMP debug - cert.p12 sanity check
-        # One-off diagnostic for the signing-credential investigation on
-        # card 4185bf3b-9510-81b7-bc0b-e515a9dad5dd — reveals only size,
-        # a hash, and openssl's own (non-secret) diagnostic text, never
-        # the secret content itself. Remove once resolved.
+      - name: Re-export cert.p12 in a Keychain-compatible format
+        # CSC_LINK's .p12 was built with a modern OpenSSL (3.x) default:
+        # PBES2/PBKDF2/AES-256-CBC content encryption + SHA-256 MAC.
+        # Verified live (run 43588421771, card 4185bf3b-9510-81b7-bc0b-
+        # e515a9dad5dd): macOS's `security import` — the old CDSA-based
+        # Keychain Services crypto, NOT modern OpenSSL — cannot parse that
+        # scheme at all and reports it identically to a wrong password
+        # ("MAC verification failed ... wrong password?"), even though
+        # `openssl pkcs12 -info` on this very runner parses the same file
+        # and verifies its MAC fine with the real CSC_KEY_PASSWORD. The
+        # runner's own openssl (LibreSSL, which never adopted the PBES2
+        # default and so is Keychain-compatible on write) can read the
+        # modern file and re-export it in the old RC2/3DES+SHA1 scheme
+        # `security import` understands — no new credential material
+        # needed, just a format conversion of what's already in CSC_LINK.
         if: env.CSC_LINK_RAW != ''
         run: |
-          echo "cert.p12 size: $(wc -c < "$RUNNER_TEMP/csc/cert.p12") bytes"
-          echo "cert.p12 sha256: $(shasum -a 256 "$RUNNER_TEMP/csc/cert.p12" | awk '{print $1}')"
-          echo "cert.p12 first 16 bytes (hex): $(head -c 16 "$RUNNER_TEMP/csc/cert.p12" | xxd -p | tr -d '\n')"
-          echo "CSC_KEY_PASSWORD length: ${#CSC_KEY_PASSWORD}"
-          openssl pkcs12 -in "$RUNNER_TEMP/csc/cert.p12" -info -noout -passin "pass:$CSC_KEY_PASSWORD" -legacy 2>&1 || true
-          echo "--- retry without -legacy ---"
-          openssl pkcs12 -in "$RUNNER_TEMP/csc/cert.p12" -info -noout -passin "pass:$CSC_KEY_PASSWORD" 2>&1 || true
+          openssl pkcs12 -in "$RUNNER_TEMP/csc/cert.p12" -nodes -passin "pass:$CSC_KEY_PASSWORD" -out "$RUNNER_TEMP/csc/combined.pem"
+          openssl pkcs12 -export -in "$RUNNER_TEMP/csc/combined.pem" -out "$RUNNER_TEMP/csc/cert-legacy.p12" -passout "pass:$CSC_KEY_PASSWORD" -name "Developer ID Application"
+          rm -f "$RUNNER_TEMP/csc/combined.pem"
+          echo "CSC_LINK=$RUNNER_TEMP/csc/cert-legacy.p12" >> "$GITHUB_ENV"
 
       - name: Build + package
         # Always publishes to the GitHub Release on a tag push — signing
