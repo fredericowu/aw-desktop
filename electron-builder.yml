@@ -36,3 +36,8 @@ publish:
   provider: github
   owner: fredericowu
   repo: aw-desktop
+  # electron-builder's GitHub publisher creates a DRAFT release by
+  # default — invisible/undownloadable to anyone without repo write
+  # access. A direct-download app needs a real, public release the
+  # moment a tag is pushed.
+  releaseType: release
