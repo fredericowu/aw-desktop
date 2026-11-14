@@ -25,6 +25,13 @@ mac:
 afterSign: build/notarize.js
 dmg:
   sign: false
+win:
+  target:
+    - nsis
+  artifactName: "${productName}-Setup-${version}.${ext}"
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
 publish:
   provider: github
   owner: fredericowu

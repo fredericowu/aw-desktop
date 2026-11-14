@@ -1,8 +1,10 @@
-name: macOS Release
+name: Desktop Release
 
-# Needs a REAL macOS runner for code signing + notarization — unlike this
-# org's Linux bare-metal CI runners, GitHub-hosted macOS is used here on
-# purpose (same reasoning as aw-meta-glasses-2's ios.yml).
+# macOS needs a REAL macOS runner for code signing + notarization — unlike
+# this org's Linux bare-metal CI runners, GitHub-hosted macOS is used here
+# on purpose (same reasoning as aw-meta-glasses-2's ios.yml). Windows has no
+# equivalent signing requirement yet (no EV cert) but still needs its own
+# native runner to produce a real nsis .exe.
 on:
   push:
     tags:
@@ -13,8 +15,14 @@ concurrency:
   group: aw-desktop-release
   cancel-in-progress: false
 
+# electron-builder's GitHub publisher needs to create/update the Release —
+# the repo's default GITHUB_TOKEN permission is read-only, so without this
+# the publish step 403s even with --publish always.
+permissions:
+  contents: write
+
 jobs:
-  release:
+  release-macos:
     runs-on: macos-15
     timeout-minutes: 40
     env:
@@ -43,14 +51,46 @@ jobs:
           echo "ASC_KEY_PATH=$RUNNER_TEMP/asc/AuthKey.p8" >> "$GITHUB_ENV"
 
       - name: Build + package
-        # Publishes straight to the GitHub Release (feeding electron-updater)
-        # once CSC_LINK proves signing is actually configured; otherwise
-        # builds locally-only so an unsigned run still produces artifacts
-        # instead of failing on a push with no secrets yet.
-        run: npm run build && npx electron-builder --mac --publish ${{ env.CSC_LINK != '' && 'always' || 'never' }}
+        # Always publishes to the GitHub Release on a tag push — signing
+        # (CSC_LINK) and notarization (ASC_*) stay independently gated
+        # inside electron-builder.yml / build/notarize.js; an unsigned DMG
+        # is still a real, downloadable artifact, just Gatekeeper-warned.
+        run: npm run build && npx electron-builder --mac --publish always
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: aw-desktop-${{ env.CSC_LINK != '' && 'signed' || 'unsigned' }}
+          name: aw-desktop-mac-${{ env.CSC_LINK != '' && 'signed' || 'unsigned' }}
           path: dist/*.dmg
+
+  release-windows:
+    # Serialized after macOS so both jobs don't race creating the same
+    # GitHub Release for this tag — electron-builder's GitHub publisher
+    # creates the release on first publish, then reuses it on subsequent
+    # ones; running both at once risks two concurrent "create" attempts.
+    needs: release-macos
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Package + publish (unsigned — no code-signing cert yet)
+        run: npx electron-builder --win --publish always
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: aw-desktop-windows-unsigned
+          path: dist/*.exe

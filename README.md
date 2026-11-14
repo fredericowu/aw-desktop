@@ -100,9 +100,48 @@ Once those are set as GitHub Actions secrets on this repo, pushing a `v*`
 tag (or a manual `workflow_dispatch`) builds, signs, notarizes, and
 publishes a GitHub Release that `electron-updater` consumes.
 
+## Releasing (macOS + Windows)
+
+`.github/workflows/release.yml` ("Desktop Release") builds and publishes
+both platforms to one GitHub Release per tag:
+
+1. Bump `version` in `package.json` to `X.Y.Z`.
+2. Commit that bump.
+3. Tag the commit `vX.Y.Z` (the leading `v` is required — the workflow
+   triggers on `push: tags: v*`) and push the tag:
+   ```bash
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   ```
+4. The tag push fires both jobs: `release-macos` (macOS 15 runner, dmg +
+   zip) then `release-windows` (windows-latest runner, nsis installer),
+   serialized so they don't race creating the same Release. Each publishes
+   straight to the GitHub Release for that tag — unconditionally, even
+   without signing secrets configured, so every tag push produces real,
+   downloadable artifacts.
+5. `workflow_dispatch` re-runs the same thing manually against whatever
+   tag/ref you pick, useful for retrying a failed publish without a new
+   version.
+
+The tag and `package.json`'s `version` must always move together — the
+workflow does not read or enforce the version itself (electron-builder
+takes it from `package.json`), so a tag that doesn't match `package.json`
+will still build and publish, just under a misleading Release name/file
+version. Never reuse a tag; cut a new patch version instead.
+
+**Signing status:** until Apple (`CSC_LINK`/`CSC_KEY_PASSWORD`,
+`ASC_KEY_ID`/`ASC_ISSUER_ID`/`ASC_KEY_CONTENT_B64`/`APPLE_TEAM_ID`) and
+Windows code-signing secrets exist on this repo, every release is
+unsigned: macOS shows a Gatekeeper "unidentified developer" warning
+(right-click → Open bypasses it), Windows shows a SmartScreen warning
+("More info" → "Run anyway" bypasses it). Both are expected and should be
+called out plainly in the Release notes, not hidden.
+
 ## Out of scope (Phase 1)
 
-Windows/Linux builds, usage metering/billing (a separate Target,
-graduates later), Mac App Store distribution, offline mode, multi-account
+Linux builds, usage metering/billing (a separate Target, graduates
+later), Mac App Store distribution, offline mode, multi-account
 switching, native workspace-creation UI (delegated to the embedded
-console page).
+console page), code-signing/notarization itself (blocked on real
+credentials), electron-updater's actual auto-update behavior (not yet
+exercised end to end).
