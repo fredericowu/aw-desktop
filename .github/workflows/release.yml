@@ -58,6 +58,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Typecheck + unit tests
+        run: npm run typecheck && npm test
+
       - name: Write App Store Connect API key
         if: env.ASC_KEY_CONTENT_B64 != ''
         run: |

@@ -13,6 +13,53 @@ export interface Membership {
   role: string;
 }
 
+/** A row of GET /api/workspaces (subset of aw-backend's _serialize). */
+export interface WorkspaceInfo {
+  name: string;
+  placement_driver: string;
+  is_hosted: boolean;
+  status: string;
+}
+
+/** GET /api/accounts/me — limits + local_count are added by aw-backend's
+ * max_local_workspaces change; absent on an older backend. */
+export interface AccountInfo {
+  limits?: { max_workspaces?: number; max_local_workspaces?: number };
+  local_count?: number;
+}
+
+export type RuntimeKind = "podman" | "docker-desktop" | "colima";
+
+export interface RuntimeStatus {
+  kind: RuntimeKind;
+  installed: boolean;
+  running: boolean;
+  path?: string;
+}
+
+export interface RuntimeCheck {
+  runtimes: RuntimeStatus[];
+  /** At least one runtime is installed AND running. */
+  ready: boolean;
+}
+
+/** Result of a call that can fail with a backend error: `code` is the
+ * backend's `error` field (e.g. plan_limit_local_workspaces), `status` the
+ * HTTP status. */
+export interface ApiResult<T> {
+  ok: boolean;
+  data?: T;
+  error?: string;
+  code?: string;
+  status?: number;
+  limit?: number;
+}
+
+export interface WorkspaceListData {
+  workspaces: WorkspaceInfo[];
+  account: AccountInfo | null;
+}
+
 export type AuthStage =
   | "splash"
   | "login"
@@ -47,7 +94,9 @@ export interface AwBridge {
   verifyEmailCode(email: string, code: string): Promise<SessionResult>;
   startGoogleSignIn(): Promise<{ ok: boolean; error?: string }>;
   pickWorkspace(slug: string): Promise<{ ok: boolean; error?: string }>;
-  createWorkspace(): Promise<{ ok: boolean; error?: string }>;
+  listWorkspaces(): Promise<ApiResult<WorkspaceListData>>;
+  checkRuntime(): Promise<RuntimeCheck>;
+  createLocalWorkspace(name: string): Promise<ApiResult<WorkspaceInfo>>;
   logout(): Promise<void>;
   onStateChanged(cb: (state: AuthState) => void): () => void;
 }

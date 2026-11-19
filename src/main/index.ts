@@ -7,7 +7,8 @@ import { injectIdentityCookie, clearIdentityCookie } from "./cookie";
 import { registerProtocolHandler, startGoogleSignInHandoff } from "./oauth";
 import { createAuthWindow, createShellWindow } from "./windows";
 import { checkForUpdates } from "./updater";
-import type { AuthState, AwUser } from "../shared/types";
+import { probeRuntimes } from "./runtimeProbe";
+import type { ApiResult, AuthState, AwUser, WorkspaceInfo, WorkspaceListData } from "../shared/types";
 
 // macOS only (Phase 1, per Architect design) — a second instance just
 // focuses the first rather than opening twice, which also keeps a single
@@ -40,18 +41,11 @@ function teardownToLogin(error: string | null = null): void {
   setState({ stage: "login", user: null, error });
 }
 
-/** Routes a freshly-authenticated user per the Architect design §2:
- * exactly one membership loads straight into the shell, several show the
- * native picker, zero sends them into the console's workspace-creation
- * page (still inside an authenticated webview, not rebuilt natively). */
+/** Every authenticated user lands on the Local/Cloud picker — with 0, 1 or
+ * N memberships. The picker is where the guided local create lives, so a
+ * single membership no longer skips it. */
 function routeAfterAuth(user: AwUser): void {
-  if (user.memberships.length === 1) {
-    void openWorkspace(user.memberships[0].workspace);
-  } else if (user.memberships.length === 0) {
-    void openWorkspaceCreation();
-  } else {
-    setState({ stage: "picker", user, error: null });
-  }
+  setState({ stage: "picker", user, error: null });
 }
 
 async function openWorkspace(slug: string): Promise<void> {
@@ -60,23 +54,6 @@ async function openWorkspace(slug: string): Promise<void> {
   await injectIdentityCookie(currentToken);
   authWindow?.hide();
   shellWindow = createShellWindow(workspaceUrl(slug));
-  watchForSessionExpiry(shellWindow);
-}
-
-/** Zero-membership path: load the console's "new workspace" page inside
- * an authenticated shell window and watch for the redirect into the
- * created workspace's own subdomain — per the design, workspace creation
- * is never rebuilt as a native screen. */
-async function openWorkspaceCreation(): Promise<void> {
-  if (!currentToken) return teardownToLogin("session_lost");
-  setState({ stage: "loading-workspace", error: null });
-  await injectIdentityCookie(currentToken);
-  authWindow?.hide();
-  shellWindow = createShellWindow(`${CONSOLE_BASE}/workspaces/new`);
-  shellWindow.webContents.on("did-navigate", (_event, url) => {
-    const match = /^https:\/\/([^.]+)\.workspace\./.exec(url);
-    if (match) watchForSessionExpiry(shellWindow!);
-  });
   watchForSessionExpiry(shellWindow);
 }
 
@@ -142,6 +119,13 @@ function handleAuthSuccess(token: string, user: AwUser): { ok: true; user: AwUse
   return { ok: true, user };
 }
 
+function apiFailure<T>(err: unknown, fallback: string): ApiResult<T> {
+  if (err instanceof ApiError) {
+    return { ok: false, error: err.message, code: err.code, status: err.status, limit: err.limit };
+  }
+  return { ok: false, error: err instanceof Error ? err.message : fallback };
+}
+
 function registerIpcHandlers(): void {
   ipcMain.handle("aw:getState", () => state);
 
@@ -201,9 +185,30 @@ function registerIpcHandlers(): void {
     return { ok: true };
   });
 
-  ipcMain.handle("aw:createWorkspace", async () => {
-    await openWorkspaceCreation();
-    return { ok: true };
+  ipcMain.handle("aw:listWorkspaces", async (): Promise<ApiResult<WorkspaceListData>> => {
+    if (!currentToken) return { ok: false, error: "session_lost" };
+    try {
+      const workspaces = await api.listWorkspaces(currentToken);
+      // limits/local_count only exist on a backend with max_local_workspaces;
+      // a failure here must not hide the list.
+      const account = await api.accountMe(currentToken).catch(() => null);
+      return { ok: true, data: { workspaces, account } };
+    } catch (err) {
+      return apiFailure(err, "list_failed");
+    }
+  });
+
+  ipcMain.handle("aw:checkRuntime", () => probeRuntimes());
+
+  // Creates the REAL BYOD row (placement_driver=remote-host). No bootstrap:
+  // that is Phase 2, so the row stays "provisioning" / setup pending.
+  ipcMain.handle("aw:createLocalWorkspace", async (_e, name: string): Promise<ApiResult<WorkspaceInfo>> => {
+    if (!currentToken) return { ok: false, error: "session_lost" };
+    try {
+      return { ok: true, data: await api.createWorkspace(currentToken, name) };
+    } catch (err) {
+      return apiFailure(err, "create_failed");
+    }
   });
 
   ipcMain.handle("aw:logout", () => logout());

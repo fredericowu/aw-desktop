@@ -10,8 +10,8 @@ const RENDERER_DEV_URL = process.env["ELECTRON_RENDERER_URL"];
  * the shell window below (hardening default #9 on the Architect card). */
 export function createAuthWindow(): BrowserWindow {
   const win = new BrowserWindow({
-    width: 420,
-    height: 600,
+    width: 480,
+    height: 720,
     resizable: false,
     title: "AW Desktop",
     webPreferences: {
@@ -20,6 +20,13 @@ export function createAuthWindow(): BrowserWindow {
       nodeIntegration: false,
       sandbox: true,
     },
+  });
+
+  // The picker's runtime-install guidance links out (Docker Desktop /
+  // Podman downloads): always the system browser, never a second window.
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https:\/\//.test(url)) shell.openExternal(url);
+    return { action: "deny" };
   });
 
   if (is.dev && RENDERER_DEV_URL) {
