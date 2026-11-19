@@ -1,4 +1,4 @@
-import { app, ipcMain, powerMonitor, BrowserWindow } from "electron";
+import { app, ipcMain, powerMonitor, BrowserWindow, Menu } from "electron";
 import { APEX, CONSOLE_BASE, workspaceUrl } from "./config";
 import * as api from "./apiClient";
 import { ApiError } from "./apiClient";
@@ -206,15 +206,69 @@ function registerIpcHandlers(): void {
     return { ok: true };
   });
 
-  ipcMain.handle("aw:logout", async () => {
-    if (currentToken) await api.logout(currentToken);
-    teardownToLogin(null);
-  });
+  ipcMain.handle("aw:logout", () => logout());
+}
+
+/** Best-effort server logout (3s cap) — teardown ALWAYS runs, so a failed
+ * or hanging network call can never leave the user stuck logged in. */
+async function logout(): Promise<void> {
+  const token = currentToken;
+  if (token) {
+    try {
+      await Promise.race([
+        api.logout(token),
+        new Promise<void>((resolve) => setTimeout(resolve, 3000)),
+      ]);
+    } catch {
+      // ignore: local teardown below is what matters
+    }
+  }
+  teardownToLogin(null);
+}
+
+/** Closes the workspace window and shows the native picker, even for a
+ * user with a single membership. Re-fetches /me so new workspaces appear. */
+async function switchWorkspace(): Promise<void> {
+  if (!currentToken) return teardownToLogin("session_lost");
+  let user = state.user;
+  try {
+    user = await api.me(currentToken);
+  } catch (err) {
+    if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+      return teardownToLogin("session_expired");
+    }
+  }
+  shellWindow?.close();
+  shellWindow = null;
+  if (!authWindow || authWindow.isDestroyed()) authWindow = createAuthWindow();
+  authWindow.show();
+  authWindow.focus();
+  setState({ stage: "picker", user, error: null });
+}
+
+function buildAppMenu(): void {
+  const isMac = process.platform === "darwin";
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      ...(isMac ? [{ role: "appMenu" as const }] : []),
+      {
+        label: "Workspace",
+        submenu: [
+          { label: "Switch Workspace…", accelerator: "CmdOrCtrl+Shift+W", click: () => void switchWorkspace() },
+          { label: "Log out", accelerator: "CmdOrCtrl+Shift+L", click: () => void logout() },
+        ],
+      },
+      { role: "editMenu" as const },
+      { role: "viewMenu" as const },
+      { role: "windowMenu" as const },
+    ]),
+  );
 }
 
 app.whenReady().then(async () => {
   registerProtocolHandler();
   registerIpcHandlers();
+  buildAppMenu();
   await bootstrap();
 
   setInterval(refreshLoop, REFRESH_INTERVAL_MS);
