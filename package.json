@@ -1,6 +1,6 @@
 {
   "name": "aw-desktop",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Native macOS shell for aw-workspace — signed/notarized Electron thin client wrapping the hosted workspace UI.",
   "private": true,
   "main": "out/main/index.js",
@@ -11,23 +11,28 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p src/renderer/tsconfig.json",
-    "dist": "npm run build && electron-builder --mac --publish never"
+    "dist": "npm run build && electron-builder --mac --publish never",
+    "test": "vitest run"
   },
   "dependencies": {
     "electron-updater": "^6.3.9"
   },
   "devDependencies": {
     "@electron/notarize": "^3.0.1",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",
-    "@vitejs/plugin-react": "^4.3.4",
+    "@vitejs/plugin-react": "^4.7.0",
     "electron": "^33.4.11",
     "electron-builder": "^25.1.8",
     "electron-vite": "^6.0.0",
+    "jsdom": "^25.0.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "typescript": "^5.7.3",
-    "vite": "^6.0.11"
+    "vite": "^6.0.11",
+    "vitest": "^2.1.9"
   },
   "allowScripts": {
     "electron@33.4.11": true,

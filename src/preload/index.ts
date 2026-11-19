@@ -9,7 +9,9 @@ const bridge: AwBridge = {
   verifyEmailCode: (email, code) => ipcRenderer.invoke("aw:verifyEmailCode", email, code),
   startGoogleSignIn: () => ipcRenderer.invoke("aw:startGoogleSignIn"),
   pickWorkspace: (slug) => ipcRenderer.invoke("aw:pickWorkspace", slug),
-  createWorkspace: () => ipcRenderer.invoke("aw:createWorkspace"),
+  listWorkspaces: () => ipcRenderer.invoke("aw:listWorkspaces"),
+  checkRuntime: () => ipcRenderer.invoke("aw:checkRuntime"),
+  createLocalWorkspace: (name) => ipcRenderer.invoke("aw:createLocalWorkspace", name),
   logout: () => ipcRenderer.invoke("aw:logout"),
   onStateChanged: (cb: (state: AuthState) => void) => {
     const listener = (_event: unknown, next: AuthState) => cb(next);
