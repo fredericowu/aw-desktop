@@ -28,8 +28,10 @@ mac:
   # "secret holds the credential, CI decodes it" shape as
   # aw-meta-glasses-2's ASC_KEY_CONTENT_B64 — see .github/workflows/release.yml.
 afterSign: build/notarize.js
+# The DMG container itself must be Developer ID signed (AC6); it is then
+# notarized + stapled by build/finalize-dmg.sh after electron-builder runs.
 dmg:
-  sign: false
+  sign: true
 win:
   icon: build/icon.ico
   target:
