@@ -117,6 +117,17 @@ export function createWorkspace(token: string, name: string): Promise<WorkspaceI
   return post<WorkspaceInfo>("/api/workspaces", { name, placement_driver: "remote-host" }, token);
 }
 
+/** POST /api/workspaces/{slug}/bootstrap-token -> one-time awbs_ token. The
+ * caller must never log or persist it. */
+export function mintBootstrapToken(token: string, slug: string): Promise<{ token: string; expires_at: number }> {
+  return post(`/api/workspaces/${encodeURIComponent(slug)}/bootstrap-token`, {}, token);
+}
+
+/** GET /api/workspaces/{slug} — detail row; `status` flips to running once linked + up. */
+export function getWorkspace(token: string, slug: string): Promise<WorkspaceInfo> {
+  return get<WorkspaceInfo>(`/api/workspaces/${encodeURIComponent(slug)}`, token);
+}
+
 export async function refresh(token: string): Promise<TokenResponse> {
   const res = await fetch(`${API_BASE}/api/identity/refresh`, {
     method: "POST",

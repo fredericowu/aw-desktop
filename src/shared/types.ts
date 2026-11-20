@@ -96,7 +96,39 @@ export interface AwBridge {
   pickWorkspace(slug: string): Promise<{ ok: boolean; error?: string }>;
   listWorkspaces(): Promise<ApiResult<WorkspaceListData>>;
   checkRuntime(): Promise<RuntimeCheck>;
+  /** Pre-flight + create the row + start the bootstrap. Blocked (code
+   * `already_linked`) BEFORE anything is created when this Mac already hosts a workspace. */
   createLocalWorkspace(name: string): Promise<ApiResult<WorkspaceInfo>>;
+  getLocalHost(): Promise<LocalHostStatus>;
+  /** Resume / retry a row that exists but never came up. Never creates a row. */
+  finishLocalSetup(slug: string): Promise<ApiResult<null>>;
+  getBootstrapProgress(): Promise<BootstrapProgress | null>;
+  onBootstrapProgress(cb: (p: BootstrapProgress) => void): () => void;
   logout(): Promise<void>;
   onStateChanged(cb: (state: AuthState) => void): () => void;
+}
+
+/** What `aw-remote-host status` (plus the credentials file) says about THIS
+ * Mac. `unknown` = we could not tell (binary missing but credentials exist,
+ * or status output unparseable) and is treated as "linked" by the guard. */
+export interface LocalHostStatus {
+  binary: boolean;
+  linked: boolean;
+  unknown?: boolean;
+  remoteHostId?: string;
+  workspaceSlug?: string;
+  provisioned?: boolean;
+}
+
+export type BootstrapStepId = "cli" | "token" | "link" | "podman" | "postgres" | "redis" | "workspace" | "running";
+
+export interface BootstrapProgress {
+  slug: string;
+  phase: "running" | "failed" | "done";
+  step: BootstrapStepId | null;
+  done: BootstrapStepId[];
+  /** Last log lines, secrets redacted. */
+  lines: string[];
+  error?: string;
+  failedStep?: BootstrapStepId;
 }

@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { AwBridge, AuthState } from "../shared/types";
+import type { AwBridge, AuthState, BootstrapProgress } from "../shared/types";
 
 const bridge: AwBridge = {
   getState: () => ipcRenderer.invoke("aw:getState"),
@@ -12,6 +12,14 @@ const bridge: AwBridge = {
   listWorkspaces: () => ipcRenderer.invoke("aw:listWorkspaces"),
   checkRuntime: () => ipcRenderer.invoke("aw:checkRuntime"),
   createLocalWorkspace: (name) => ipcRenderer.invoke("aw:createLocalWorkspace", name),
+  getLocalHost: () => ipcRenderer.invoke("aw:getLocalHost"),
+  finishLocalSetup: (slug) => ipcRenderer.invoke("aw:finishLocalSetup", slug),
+  getBootstrapProgress: () => ipcRenderer.invoke("aw:getBootstrapProgress"),
+  onBootstrapProgress: (cb: (p: BootstrapProgress) => void) => {
+    const listener = (_event: unknown, next: BootstrapProgress) => cb(next);
+    ipcRenderer.on("aw:bootstrap-progress", listener);
+    return () => ipcRenderer.removeListener("aw:bootstrap-progress", listener);
+  },
   logout: () => ipcRenderer.invoke("aw:logout"),
   onStateChanged: (cb: (state: AuthState) => void) => {
     const listener = (_event: unknown, next: AuthState) => cb(next);

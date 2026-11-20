@@ -8,7 +8,9 @@ import { registerProtocolHandler, startGoogleSignInHandoff } from "./oauth";
 import { createAuthWindow, createShellWindow } from "./windows";
 import { checkForUpdates } from "./updater";
 import { probeRuntimes } from "./runtimeProbe";
-import type { ApiResult, AuthState, AwUser, WorkspaceInfo, WorkspaceListData } from "../shared/types";
+import { killActiveBootstrap, readHostStatus, realHostOps, runBootstrapFlow } from "./localBootstrap";
+import { decidePreflight } from "./bootstrapCore";
+import type { ApiResult, AuthState, AwUser, BootstrapProgress, WorkspaceInfo, WorkspaceListData } from "../shared/types";
 
 // macOS only (Phase 1, per Architect design) — a second instance just
 // focuses the first rather than opening twice, which also keeps a single
@@ -23,6 +25,9 @@ const ACCOUNT_TIMEOUT_MS = 4000;
 let authWindow: BrowserWindow | null = null;
 let shellWindow: BrowserWindow | null = null;
 let currentToken: string | null = null;
+
+let bootstrapProgress: BootstrapProgress | null = null;
+let bootstrapRunning = false;
 
 let state: AuthState = { stage: "splash", user: null, error: null, apex: APEX };
 
@@ -127,6 +132,35 @@ function apiFailure<T>(err: unknown, fallback: string): ApiResult<T> {
   return { ok: false, error: err instanceof Error ? err.message : fallback };
 }
 
+function emitBootstrap(p: BootstrapProgress): void {
+  bootstrapProgress = p;
+  authWindow?.webContents.send("aw:bootstrap-progress", p);
+}
+
+async function startBootstrap(slug: string): Promise<void> {
+  bootstrapRunning = true;
+  try {
+    const result = await runBootstrapFlow(slug, {
+      ops: realHostOps(),
+      // The token only ever lives in this closure's return value: not logged, not persisted.
+      mintToken: async (s) => {
+        if (!currentToken) throw new Error("session_lost");
+        return (await api.mintBootstrapToken(currentToken, s)).token;
+      },
+      getStatus: async (s) => {
+        if (!currentToken) throw new Error("session_lost");
+        return (await api.getWorkspace(currentToken, s)).status;
+      },
+      emit: emitBootstrap,
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      now: () => Date.now(),
+    });
+    if (result.phase === "done") await openWorkspace(slug);
+  } finally {
+    bootstrapRunning = false;
+  }
+}
+
 function registerIpcHandlers(): void {
   ipcMain.handle("aw:getState", () => state);
 
@@ -204,15 +238,34 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle("aw:checkRuntime", () => probeRuntimes());
 
-  // Creates the REAL BYOD row (placement_driver=remote-host). No bootstrap:
-  // that is Phase 2, so the row stays "provisioning" / setup pending.
+  ipcMain.handle("aw:getLocalHost", () => readHostStatus(realHostOps()));
+  ipcMain.handle("aw:getBootstrapProgress", () => bootstrapProgress);
+
+  // Pre-flight FIRST: a Mac that already hosts a workspace is refused before
+  // a row exists or a token is minted. Then the REAL BYOD row, then the
+  // bootstrap runs in the background (progress over aw:bootstrap-progress).
   ipcMain.handle("aw:createLocalWorkspace", async (_e, name: string): Promise<ApiResult<WorkspaceInfo>> => {
     if (!currentToken) return { ok: false, error: "session_lost" };
+    if (bootstrapRunning) return { ok: false, error: "A setup is already running on this Mac.", code: "bootstrap_running" };
+    const pre = decidePreflight(await readHostStatus(realHostOps()));
+    if (pre.action === "block") return { ok: false, error: pre.message, code: "already_linked" };
     try {
-      return { ok: true, data: await api.createWorkspace(currentToken, name) };
+      const row = await api.createWorkspace(currentToken, name);
+      void startBootstrap(row.name);
+      return { ok: true, data: row };
     } catch (err) {
       return apiFailure(err, "create_failed");
     }
+  });
+
+  // Resume/retry for a row that exists but never came up: never creates a row.
+  ipcMain.handle("aw:finishLocalSetup", async (_e, slug: string): Promise<ApiResult<null>> => {
+    if (!currentToken) return { ok: false, error: "session_lost" };
+    if (bootstrapRunning) return { ok: false, error: "A setup is already running on this Mac.", code: "bootstrap_running" };
+    const pre = decidePreflight(await readHostStatus(realHostOps()), slug);
+    if (pre.action === "block") return { ok: false, error: pre.message, code: "already_linked" };
+    void startBootstrap(slug);
+    return { ok: true, data: null };
   });
 
   ipcMain.handle("aw:logout", () => logout());
@@ -285,6 +338,8 @@ app.whenReady().then(async () => {
   void refreshLoop();
   void checkForUpdates();
 });
+
+app.on("before-quit", () => killActiveBootstrap());
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
