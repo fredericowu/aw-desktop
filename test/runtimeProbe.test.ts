@@ -71,4 +71,11 @@ describe("probeRuntimes", () => {
       expect(candidatePaths(k, "/Users/u").every((p) => p.startsWith("/"))).toBe(true);
     }
   });
+
+  it("probes Docker Desktop's own engine, not the active docker context", async () => {
+    const cli = "/Applications/Docker.app/Contents/Resources/bin/docker";
+    const d = deps(["/Applications/Docker.app", cli], { [cli]: 0 });
+    await probeRuntimes(d);
+    expect(d.calls).toContain(`${cli} --context desktop-linux info`);
+  });
 });
