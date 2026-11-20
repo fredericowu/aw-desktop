@@ -116,7 +116,14 @@ jobs:
         # (CSC_LINK) and notarization (ASC_*) stay independently gated
         # inside electron-builder.yml / build/notarize.js; an unsigned DMG
         # is still a real, downloadable artifact, just Gatekeeper-warned.
-        run: npm run build && npx electron-builder --mac --publish always
+        run: npm run build && npx electron-builder --mac --publish never
+
+      - name: Notarize + staple DMG, verify, publish
+        # electron-builder signs the DMG (dmg.sign) but only the .app is
+        # notarized by afterSign; the DMG container is notarized + stapled
+        # here, verified, then every mac asset is uploaded to the Release.
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: bash build/finalize-dmg.sh "${GITHUB_REF_NAME}"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
