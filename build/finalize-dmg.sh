@@ -31,5 +31,12 @@ done
 
 # Publish: the release may not exist yet (windows job runs after this one).
 gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes "AW Desktop $TAG" --verify-tag
-assets=("$DIST"/*.dmg "$DIST"/*.zip "$DIST"/*.zip.blockmap "$DIST"/latest-mac.yml)
-gh release upload "$TAG" "${assets[@]}" --clobber
+# Stage under the names in latest-mac.yml: files on disk contain a space
+# ("AW Desktop-..."), which GitHub would rewrite to "AW.Desktop-...".
+stage="$(mktemp -d)"
+for f in "$DIST"/*.dmg "$DIST"/*.zip "$DIST"/*.zip.blockmap "$DIST"/latest-mac.yml; do
+  [ -e "$f" ] || continue
+  b="$(basename "$f")"
+  cp "$f" "$stage/${b// /-}"
+done
+gh release upload "$TAG" "$stage"/* --clobber

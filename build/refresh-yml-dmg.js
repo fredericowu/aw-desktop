@@ -7,7 +7,9 @@ const crypto = require("node:crypto");
 function refresh(yml, dmgPath) {
   const buf = fs.readFileSync(dmgPath);
   const sha512 = crypto.createHash("sha512").update(buf).digest("base64");
-  const name = path.basename(dmgPath);
+  // electron-builder writes the hyphenated name into the manifest although the
+  // file on disk is "AW Desktop-<v>-arm64.dmg".
+  const name = path.basename(dmgPath).replace(/ /g, "-");
   const lines = yml.split("\n");
   let hit = false;
   for (let i = 0; i < lines.length; i++) {

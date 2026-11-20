@@ -32,6 +32,13 @@ describe("refresh-yml-dmg", () => {
     expect(out.match(/ZIPHASH/g)).toHaveLength(2);
     expect(out).toContain("size: 10");
   });
+  it("matches the hyphenated manifest name for a DMG with a space on disk", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dmg-"));
+    const dmg = path.join(dir, "AW Desktop-0.1.6-arm64.dmg");
+    fs.writeFileSync(dmg, "stapled-bytes");
+    const yml = YML.replace("A-0.1.6-arm64.dmg", "AW-Desktop-0.1.6-arm64.dmg");
+    expect(refresh(yml, dmg)).toContain("size: 13");
+  });
   it("throws when the dmg has no entry", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dmg-"));
     const dmg = path.join(dir, "Other.dmg");
