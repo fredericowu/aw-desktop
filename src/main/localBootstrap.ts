@@ -29,6 +29,8 @@ export interface HostOps {
   installBinary(onLine: (l: string) => void): Promise<string>;
   /** Runs bootstrap-workspace; resolves the exit code. Token is passed via argv only. */
   runBootstrap(binary: string, token: string | null, controlPlane: string | undefined, onLine: (l: string) => void): Promise<number | null>;
+  /** Stops a running bootstrap child (deadline hit). */
+  killBootstrap(): void;
 }
 
 export async function readHostStatus(ops: Pick<HostOps, "findBinary" | "hasCredentials" | "runStatus">): Promise<LocalHostStatus> {
@@ -47,6 +49,8 @@ export interface FlowDeps {
   mintToken(slug: string): Promise<string>;
   /** Must honour `signal`; the flow also races it against the deadline. */
   getStatus(slug: string, signal: AbortSignal): Promise<string>;
+  /** remote_host_id the control plane has on the row, for resuming a partial registration. */
+  getRowHostId?(slug: string): Promise<string | null>;
   /** Control plane the token was minted against; passed to the CLI as --control-plane. */
   controlPlane?: string;
   emit(p: BootstrapProgress): void;
@@ -54,11 +58,29 @@ export interface FlowDeps {
   now(): number;
   pollIntervalMs?: number;
   pollTimeoutMs?: number;
+  /** Bound on the bootstrap child itself (it downloads Podman with no deadline of its own). */
+  bootstrapTimeoutMs?: number;
   signal?: AbortSignal;
 }
 
 const POLL_INTERVAL_MS = 5000;
 const POLL_TIMEOUT_MS = 20 * 60 * 1000;
+export const BOOTSTRAP_TIMEOUT_MS = 15 * 60 * 1000;
+
+/** Pre-flight for resuming `slug`. When status shows a linked host with no
+ * workspace slug (partial registration) the row's host id is checked against
+ * the control plane before refusing, so the original row stays resumable. */
+export async function preflightFor(
+  host: LocalHostStatus,
+  slug: string | undefined,
+  getRowHostId?: (slug: string) => Promise<string | null>,
+) {
+  let rowHostId: string | null = null;
+  if (slug && getRowHostId && host.linked && !host.unknown && !host.workspaceSlug && host.remoteHostId) {
+    rowHostId = await getRowHostId(slug).catch(() => null);
+  }
+  return decidePreflight(host, slug, rowHostId);
+}
 
 /** Brings up the local workspace for an EXISTING row `slug`. Pre-flight runs
  * first (so a linked Mac is refused before a token is minted). Never throws:
@@ -73,7 +95,7 @@ export async function runBootstrapFlow(slug: string, deps: FlowDeps): Promise<Bo
   try {
     push(advance(p, "cli"));
     let host = await readHostStatus(deps.ops);
-    const pre = decidePreflight(host, slug);
+    const pre = await preflightFor(host, slug, deps.getRowHostId);
     if (pre.action === "block") throw new Error(pre.message);
 
     let binary = host.binary ? deps.ops.findBinary() : null;
@@ -86,7 +108,7 @@ export async function runBootstrapFlow(slug: string, deps: FlowDeps): Promise<Bo
     }
 
     push(advance(p, "link"));
-    const code = await deps.ops.runBootstrap(binary, token, deps.controlPlane, line);
+    const code = await runBounded(deps, binary, token, line);
     token = null;
     if (code !== 0) throw new Error(`aw-remote-host bootstrap-workspace exited with ${code === null ? "an error" : `code ${code}`}`);
 
@@ -105,6 +127,31 @@ export async function runBootstrapFlow(slug: string, deps: FlowDeps): Promise<Bo
     push(fail(p, err instanceof Error ? err.message : String(err)));
   }
   return p;
+}
+
+/** The child can hang (its Podman download has no deadline): bound it, kill it,
+ * and fail so Retry is offered instead of holding the setup slot forever. */
+async function runBounded(
+  deps: FlowDeps,
+  binary: string,
+  token: string | null,
+  onLine: (l: string) => void,
+): Promise<number | null> {
+  const ms = deps.bootstrapTimeoutMs ?? BOOTSTRAP_TIMEOUT_MS;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), ms);
+  });
+  try {
+    const r = await Promise.race([deps.ops.runBootstrap(binary, token, deps.controlPlane, onLine), timeout]);
+    if (r === "timeout") {
+      deps.ops.killBootstrap();
+      throw new Error(`aw-remote-host setup did not finish within ${Math.round(ms / 60000)} minutes (a download may have stalled). Retry to continue.`);
+    }
+    return r;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Single-flight slot for "a setup is running on this Mac". */
@@ -135,6 +182,29 @@ export async function exclusive<T>(slot: SetupSlot, busy: T, work: (handOff: () 
     });
   } finally {
     if (!handedOff) slot.release();
+  }
+}
+
+/** Ties a setup job to the sign-in session that started it. `end()` (sign-out)
+ * invalidates every job begun before it: they stop emitting, lose token access,
+ * abort their poll and must not auto-open a workspace for whoever signs in next. */
+export class SessionScope {
+  private epoch = 0;
+  private jobs = new Set<AbortController>();
+  begin(): { isCurrent(): boolean; signal: AbortSignal; finish(): void } {
+    const epoch = this.epoch;
+    const ac = new AbortController();
+    this.jobs.add(ac);
+    return {
+      isCurrent: () => epoch === this.epoch,
+      signal: ac.signal,
+      finish: () => void this.jobs.delete(ac),
+    };
+  }
+  end(): void {
+    this.epoch++;
+    for (const ac of this.jobs) ac.abort();
+    this.jobs.clear();
   }
 }
 
@@ -203,20 +273,29 @@ export async function fetchBytes(
   }
 }
 
-/** PATH for the bootstrap child. A Finder-launched app gets a bare PATH, so a
- * Homebrew/vendored Podman that Desktop already detected (by absolute path)
- * would be invisible to the CLI's by-name lookup and it would download a second
- * copy. Prepend the same locations runtimeProbe checks. */
+/** Vendored Podman dir that aw-remote-host itself installs and resolves. */
+export const vendoredPodmanDir = (home: string) => `${home}/podman-dist/podman/bin`;
+/** launchd's default PATH: what the detached LaunchAgent will see. */
+export const LAUNCHD_DEFAULT_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+/** PATH for the bootstrap child = PATH the LaunchAgent will have, regardless of
+ * how Desktop was launched (Finder vs terminal).
+ *
+ * Why: with --background the CLI only runs infra and detaches; the workspace
+ * install then completes INSIDE the LaunchAgent (control-plane "bootstrap"
+ * verb), whose plist carries no PATH (aw-remote-host v0.1.150
+ * servicemgr/launchd.go) and which looks podman up by name. If the child saw a
+ * Homebrew podman it would skip the vendored install and hand over to an agent
+ * that cannot see that podman. So Homebrew/`/usr/local` dirs are deliberately
+ * NOT on this PATH: a detected Homebrew Podman is deliberately not reused while
+ * the pin is v0.1.150 (Desktop installs its own vendored copy next to it).
+ * Side effect: Docker Desktop's CLI (`/usr/local/bin/docker`) is not visible
+ * either, so the CLI's podman installer does not exit early on `docker info`
+ * and always reaches `podman machine start`.
+ * Revisit when the pin moves past the aw-remote-host fix that resolves a
+ * non-vendored podman for the agent. The CLI is spawned by absolute path. */
 export function childEnv(env: NodeJS.ProcessEnv, home: string): NodeJS.ProcessEnv {
-  const extra = [
-    `${home}/.local/bin`,
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    "/opt/podman/bin",
-    `${home}/podman-dist/podman/bin`,
-  ];
-  const have = (env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin").split(":");
-  return { ...env, PATH: [...extra.filter((d) => !have.includes(d)), ...have].join(":") };
+  return { ...env, PATH: `${vendoredPodmanDir(home)}:${LAUNCHD_DEFAULT_PATH}` };
 }
 
 /** argv for the CLI. The CLI defaults to the hosted control plane; a
@@ -281,6 +360,7 @@ export function realHostOps(): HostOps {
         child.on("close", (code) => resolve(code));
         activeChild = child;
       }),
+    killBootstrap: killActiveBootstrap,
   };
 }
 
@@ -289,7 +369,7 @@ let activeChild: ReturnType<typeof spawn> | null = null;
 /** App quit mid-bootstrap: stop the child. The server row stays, so the next
  * launch offers "Finish setup" and re-runs the (idempotent) bootstrap. */
 export function killActiveBootstrap(): void {
-  activeChild?.kill("SIGTERM");
+  activeChild?.kill("SIGKILL");
   activeChild = null;
 }
 

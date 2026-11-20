@@ -19,6 +19,8 @@ export interface WorkspaceInfo {
   placement_driver: string;
   is_hosted: boolean;
   status: string;
+  /** Host this row is bound to once the control plane registered it. */
+  remote_host_id?: string | null;
 }
 
 /** GET /api/accounts/me — limits + local_count are added by aw-backend's

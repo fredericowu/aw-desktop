@@ -8,7 +8,7 @@ import { registerProtocolHandler, startGoogleSignInHandoff } from "./oauth";
 import { createAuthWindow, createShellWindow } from "./windows";
 import { checkForUpdates } from "./updater";
 import { probeRuntimes } from "./runtimeProbe";
-import { SetupSlot, exclusive, killActiveBootstrap, readHostStatus, realHostOps, runBootstrapFlow } from "./localBootstrap";
+import { SessionScope, SetupSlot, exclusive, killActiveBootstrap, preflightFor, readHostStatus, realHostOps, runBootstrapFlow } from "./localBootstrap";
 import { decidePreflight, fail, startProgress } from "./bootstrapCore";
 import type { ApiResult, AuthState, AwUser, BootstrapProgress, WorkspaceInfo, WorkspaceListData } from "../shared/types";
 
@@ -28,6 +28,8 @@ let currentToken: string | null = null;
 
 let bootstrapProgress: BootstrapProgress | null = null;
 const setupSlot = new SetupSlot();
+/** A setup job belongs to the sign-in session that started it. */
+const sessionScope = new SessionScope();
 
 let state: AuthState = { stage: "splash", user: null, error: null, apex: APEX };
 
@@ -44,6 +46,9 @@ function setState(partial: Partial<AuthState>): void {
 
 function teardownToLogin(error: string | null = null): void {
   currentToken = null;
+  // End the initiating session's setup job: no more progress, token use or auto-open.
+  sessionScope.end();
+  bootstrapProgress = null;
   clearToken();
   clearIdentityCookie().catch(() => undefined);
   shellWindow?.close();
@@ -138,7 +143,8 @@ function apiFailure<T>(err: unknown, fallback: string): ApiResult<T> {
   return { ok: false, error: err instanceof Error ? err.message : fallback };
 }
 
-function emitBootstrap(p: BootstrapProgress): void {
+function emitBootstrap(p: BootstrapProgress, isCurrent: () => boolean = () => true): void {
+  if (!isCurrent()) return;
   bootstrapProgress = p;
   try {
     liveAuthWindow()?.webContents.send("aw:bootstrap-progress", p);
@@ -149,31 +155,34 @@ function emitBootstrap(p: BootstrapProgress): void {
 
 /** Caller must already hold the slot; this releases it. */
 async function startBootstrap(slug: string): Promise<void> {
+  const scope = sessionScope.begin();
+  // The job only ever acts as the session that started it.
+  const live = () => {
+    if (!scope.isCurrent() || !currentToken) throw new Error("session_lost");
+    return currentToken;
+  };
   try {
     const result = await runBootstrapFlow(slug, {
       ops: realHostOps(),
       // The token only ever lives in this closure's return value: not logged, not persisted.
-      mintToken: async (s) => {
-        if (!currentToken) throw new Error("session_lost");
-        return (await api.mintBootstrapToken(currentToken, s)).token;
-      },
-      getStatus: async (s, signal) => {
-        if (!currentToken) throw new Error("session_lost");
-        return (await api.getWorkspace(currentToken, s, signal)).status;
-      },
+      mintToken: async (s) => (await api.mintBootstrapToken(live(), s)).token,
+      getStatus: async (s, signal) => (await api.getWorkspace(live(), s, signal)).status,
+      getRowHostId: async (s) => (await api.getWorkspace(live(), s)).remote_host_id ?? null,
       controlPlane: API_BASE,
-      emit: emitBootstrap,
+      emit: (p) => emitBootstrap(p, scope.isCurrent),
       sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
       now: () => Date.now(),
+      signal: scope.signal,
     });
-    if (result.phase === "done") {
+    if (result.phase === "done" && scope.isCurrent()) {
       await openWorkspace(slug);
       // A done snapshot must not resurface when the picker is shown again.
       bootstrapProgress = null;
     }
   } catch (err) {
-    emitBootstrap(fail(bootstrapProgress ?? startProgress(slug), err instanceof Error ? err.message : String(err)));
+    emitBootstrap(fail(bootstrapProgress ?? startProgress(slug), err instanceof Error ? err.message : String(err)), scope.isCurrent);
   } finally {
+    scope.finish();
     setupSlot.release();
   }
 }
@@ -285,7 +294,8 @@ function registerIpcHandlers(): void {
     if (!currentToken) return { ok: false, error: "session_lost" };
     return exclusive<ApiResult<null>>(setupSlot, BUSY, async (handOff) => {
       try {
-        const pre = decidePreflight(await readHostStatus(realHostOps()), slug);
+        const tk = currentToken as string;
+        const pre = await preflightFor(await readHostStatus(realHostOps()), slug, async (s) => (await api.getWorkspace(tk, s)).remote_host_id ?? null);
         if (pre.action === "block") return { ok: false, error: pre.message, code: "already_linked" };
         handOff();
         void startBootstrap(slug);

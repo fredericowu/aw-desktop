@@ -8,7 +8,7 @@ export type Preflight =
  * resuming an existing row. One full workspace per machine is a hard
  * aw-remote-host limit, and an existing credential silently wins over a new
  * token, so a linked Mac must be refused up front. */
-export function decidePreflight(host: LocalHostStatus, slug?: string): Preflight {
+export function decidePreflight(host: LocalHostStatus, slug?: string, rowHostId?: string | null): Preflight {
   if (!host.linked) return { action: "proceed", needsToken: true };
   if (host.unknown) {
     return {
@@ -18,6 +18,13 @@ export function decidePreflight(host: LocalHostStatus, slug?: string): Preflight
     };
   }
   if (slug && host.workspaceSlug === slug) return { action: "proceed", needsToken: false };
+  // Partial registration: the CLI saved the credential but its slug write
+  // failed, so status reports a linked host with no workspace. If the row on
+  // the control plane is bound to THIS host id, it is our own half-finished
+  // setup and must stay resumable (no token: the credential already exists).
+  if (slug && !host.workspaceSlug && host.remoteHostId && rowHostId && rowHostId === host.remoteHostId) {
+    return { action: "proceed", needsToken: false };
+  }
   const which = host.workspaceSlug ? ` ("${host.workspaceSlug}")` : "";
   return {
     action: "block",
@@ -32,7 +39,7 @@ export function rowState(ws: WorkspaceInfo, host: LocalHostStatus | null): RowSt
   const here = !!host && host.linked && !host.unknown && host.workspaceSlug === ws.name;
   if (ws.status === "running") return here ? "open-here" : "open-remote";
   if (!host) return "finish";
-  return decidePreflight(host, ws.name).action === "block" ? "blocked" : "finish";
+  return decidePreflight(host, ws.name, ws.remote_host_id).action === "block" ? "blocked" : "finish";
 }
 
 export const STEP_ORDER: BootstrapStepId[] = ["cli", "token", "link", "podman", "postgres", "redis", "workspace", "running"];

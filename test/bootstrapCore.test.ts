@@ -92,6 +92,25 @@ describe("pre-flight guard", () => {
   });
 });
 
+describe("partial registration (credential saved, slug write failed)", () => {
+  const h = host({ linked: true, remoteHostId: "rh_1" });
+  it("same host id on the row => proceeds, no token", () => {
+    expect(decidePreflight(h, "w", "rh_1")).toEqual({ action: "proceed", needsToken: false });
+  });
+  it("different or missing row host id => blocked", () => {
+    expect(decidePreflight(h, "w", "rh_2").action).toBe("block");
+    expect(decidePreflight(h, "w", null).action).toBe("block");
+    expect(decidePreflight(h, "w").action).toBe("block");
+  });
+  it("a host that reports a DIFFERENT workspace is never matched by host id", () => {
+    expect(decidePreflight(host({ linked: true, remoteHostId: "rh_1", workspaceSlug: "x" }), "w", "rh_1").action).toBe("block");
+  });
+  it("rowState: finish when the row is bound to this host, blocked otherwise", () => {
+    expect(rowState(row({ remote_host_id: "rh_1" }), h)).toBe("finish");
+    expect(rowState(row({ remote_host_id: "rh_2" }), h)).toBe("blocked");
+  });
+});
+
 describe("resume state machine (rowState)", () => {
   it("running + linked here => open-here", () => {
     expect(rowState(row({ status: "running" }), host({ linked: true, workspaceSlug: "w" }))).toBe("open-here");

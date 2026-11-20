@@ -414,7 +414,7 @@ function CreateWizard({
                 <div>Container runtime</div>
                 <div className="dim">Podman (Docker Desktop alone is not enough)</div>
               </div>
-              <span className={check?.ready ? "ok" : "dim"}>
+              <span className={podmanReady && !checking ? "ok" : "dim"}>
                 {checking || !check ? "Checking…" : podmanReady ? "Found" : "Podman not ready"}
               </span>
             </div>

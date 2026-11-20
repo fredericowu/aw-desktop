@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SetupSlot, bootstrapArgs, childEnv, fetchBytes, exclusive, readHostStatus, runBootstrapFlow, type FlowDeps, type HostOps } from "../src/main/localBootstrap";
+import { SessionScope, SetupSlot, bootstrapArgs, childEnv, fetchBytes, exclusive, readHostStatus, runBootstrapFlow, type FlowDeps, type HostOps } from "../src/main/localBootstrap";
 import type { BootstrapProgress } from "../src/shared/types";
 
 function ops(over: Partial<HostOps> = {}): HostOps {
@@ -12,6 +12,7 @@ function ops(over: Partial<HostOps> = {}): HostOps {
       onLine("podman: installed and verified");
       return 0;
     }),
+    killBootstrap: vi.fn(),
     ...over,
   };
 }
@@ -173,17 +174,61 @@ describe("bootstrapArgs", () => {
   });
 });
 
-describe("childEnv", () => {
-  it("gives the CLI the dirs where Desktop's runtime probe finds Podman", () => {
-    const env = childEnv({ PATH: "/usr/bin:/bin" }, "/Users/me");
-    const dirs = env.PATH!.split(":");
-    expect(dirs).toEqual(expect.arrayContaining(["/opt/homebrew/bin", "/usr/local/bin", "/Users/me/podman-dist/podman/bin", "/Users/me/.local/bin"]));
-    expect(dirs.slice(-2)).toEqual(["/usr/bin", "/bin"]);
+describe("childEnv (PATH parity with the LaunchAgent)", () => {
+  it("is the vendored podman dir plus launchd's default, even when the app PATH has Homebrew", () => {
+    const env = childEnv({ PATH: "/opt/homebrew/bin:/usr/local/bin:/opt/podman/bin:/usr/bin:/bin", HOME: "/Users/me" }, "/Users/me");
+    expect(env.PATH).toBe("/Users/me/podman-dist/podman/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+    expect(env.PATH).not.toMatch(/homebrew|\/usr\/local|\/opt\/podman/);
   });
-  it("does not duplicate dirs already on PATH and keeps other vars", () => {
-    const env = childEnv({ PATH: "/opt/homebrew/bin:/usr/bin", HOME: "/Users/me" }, "/Users/me");
-    expect(env.PATH!.split(":").filter((d) => d === "/opt/homebrew/bin").length).toBe(1);
-    expect(env.HOME).toBe("/Users/me");
+  it("is the same whether the app was launched from Finder (bare PATH) or a terminal, and keeps other vars", () => {
+    const finder = childEnv({ HOME: "/Users/me" }, "/Users/me");
+    const term = childEnv({ PATH: "/opt/homebrew/bin:/usr/bin", HOME: "/Users/me" }, "/Users/me");
+    expect(finder.PATH).toBe(term.PATH);
+    expect(term.HOME).toBe("/Users/me");
+  });
+});
+
+describe("review round 4 regressions", () => {
+  it("a bootstrap child that never exits is killed and fails with a Retry-able error", async () => {
+    const o = ops({ runBootstrap: () => new Promise<number | null>(() => undefined) });
+    const { d } = deps(o, { bootstrapTimeoutMs: 50 });
+    const p = await runBootstrapFlow("w", d);
+    expect(p.phase).toBe("failed");
+    expect(p.error).toContain("did not finish");
+    expect(o.killBootstrap).toHaveBeenCalledTimes(1);
+  });
+
+  it("partial registration: linked host, no slug, row bound to the same host id => resumes without a token", async () => {
+    const o = ops({ runStatus: async () => "linked: yes (remote_host_id=rh_1)\nprovisioned: no" });
+    const { d } = deps(o, { getRowHostId: async () => "rh_1" });
+    const p = await runBootstrapFlow("w", d);
+    expect(p.phase).toBe("done");
+    expect(d.mintToken).not.toHaveBeenCalled();
+    expect(o.runBootstrap).toHaveBeenCalledWith("/bin/arh", null, undefined, expect.any(Function));
+  });
+
+  it("partial registration with a DIFFERENT row host id (or lookup failure) still blocks", async () => {
+    const o = ops({ runStatus: async () => "linked: yes (remote_host_id=rh_1)" });
+    for (const getRowHostId of [async () => "rh_other", async (): Promise<string | null> => { throw new Error("net"); }, async () => null]) {
+      const { d } = deps(o, { getRowHostId });
+      const p = await runBootstrapFlow("w", d);
+      expect(p.phase).toBe("failed");
+    }
+    expect(o.runBootstrap).not.toHaveBeenCalled();
+  });
+});
+
+describe("SessionScope", () => {
+  it("end() invalidates earlier jobs and aborts them; later jobs are current", () => {
+    const s = new SessionScope();
+    const a = s.begin();
+    expect(a.isCurrent()).toBe(true);
+    s.end();
+    expect(a.isCurrent()).toBe(false);
+    expect(a.signal.aborted).toBe(true);
+    const b = s.begin();
+    expect(b.isCurrent()).toBe(true);
+    expect(b.signal.aborted).toBe(false);
   });
 });
 
