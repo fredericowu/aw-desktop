@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SessionScope, SetupSlot, bootstrapArgs, childEnv, fetchBytes, exclusive, readHostStatus, runBootstrapFlow, type FlowDeps, type HostOps } from "../src/main/localBootstrap";
+import { scopedExclusive, SessionScope, SetupSlot, bootstrapArgs, childEnv, fetchBytes, exclusive, readHostStatus, runBootstrapFlow, type FlowDeps, type HostOps } from "../src/main/localBootstrap";
 import type { BootstrapProgress } from "../src/shared/types";
 
 function ops(over: Partial<HostOps> = {}): HostOps {
@@ -12,7 +12,7 @@ function ops(over: Partial<HostOps> = {}): HostOps {
       onLine("podman: installed and verified");
       return 0;
     }),
-    killBootstrap: vi.fn(),
+    killBootstrap: vi.fn(async () => undefined),
     ...over,
   };
 }
@@ -215,6 +215,42 @@ describe("review round 4 regressions", () => {
       expect(p.phase).toBe("failed");
     }
     expect(o.runBootstrap).not.toHaveBeenCalled();
+  });
+});
+
+describe("round 5 regressions", () => {
+  it("the child's whole process tree is stopped (awaited) before the flow fails, so Retry cannot overlap it", async () => {
+    let treeGone = false;
+    const o = ops({
+      runBootstrap: () => new Promise<number | null>(() => undefined),
+      killBootstrap: async () => {
+        await new Promise((r) => setTimeout(r, 30));
+        treeGone = true;
+      },
+    });
+    const { d, events } = deps(o, { bootstrapTimeoutMs: 20 });
+    const p = await runBootstrapFlow("w", d);
+    expect(p.phase).toBe("failed");
+    expect(treeGone).toBe(true);
+    expect(events.filter((e) => e.phase === "failed").length).toBe(1);
+  });
+
+  it("a request that began before sign-out is not current after sign-out + sign-in, even when it resolves late", async () => {
+    const slot = new SetupSlot();
+    const scope = new SessionScope();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let currentAfterAwait: boolean | null = null;
+    const pending = scopedExclusive(slot, scope, "busy", async (session) => {
+      await gate; // e.g. createWorkspace response arriving late
+      currentAfterAwait = session.isCurrent();
+      return "done";
+    });
+    scope.end(); // A logs out
+    scope.begin(); // B signs in and starts something
+    release();
+    await pending;
+    expect(currentAfterAwait).toBe(false);
   });
 });
 

@@ -8,7 +8,7 @@ import { registerProtocolHandler, startGoogleSignInHandoff } from "./oauth";
 import { createAuthWindow, createShellWindow } from "./windows";
 import { checkForUpdates } from "./updater";
 import { probeRuntimes } from "./runtimeProbe";
-import { SessionScope, SetupSlot, exclusive, killActiveBootstrap, preflightFor, readHostStatus, realHostOps, runBootstrapFlow } from "./localBootstrap";
+import { SessionScope, type SessionHandle, SetupSlot, scopedExclusive, killActiveBootstrap, preflightFor, readHostStatus, realHostOps, runBootstrapFlow } from "./localBootstrap";
 import { decidePreflight, fail, startProgress } from "./bootstrapCore";
 import type { ApiResult, AuthState, AwUser, BootstrapProgress, WorkspaceInfo, WorkspaceListData } from "../shared/types";
 
@@ -154,8 +154,7 @@ function emitBootstrap(p: BootstrapProgress, isCurrent: () => boolean = () => tr
 }
 
 /** Caller must already hold the slot; this releases it. */
-async function startBootstrap(slug: string): Promise<void> {
-  const scope = sessionScope.begin();
+async function startBootstrap(slug: string, scope: SessionHandle): Promise<void> {
   // The job only ever acts as the session that started it.
   const live = () => {
     if (!scope.isCurrent() || !currentToken) throw new Error("session_lost");
@@ -275,13 +274,18 @@ function registerIpcHandlers(): void {
   ipcMain.handle("aw:createLocalWorkspace", async (_e, name: string): Promise<ApiResult<WorkspaceInfo>> => {
     if (!currentToken) return { ok: false, error: "session_lost" };
     const token = currentToken;
-    return exclusive<ApiResult<WorkspaceInfo>>(setupSlot, BUSY, async (handOff) => {
+    // Bound to the session at IPC entry, before any await: a response that
+    // lands after sign-out/sign-in must never run as the new user.
+    return scopedExclusive<ApiResult<WorkspaceInfo>>(setupSlot, sessionScope, BUSY, async (scope, handOff) => {
       try {
         const pre = decidePreflight(await readHostStatus(realHostOps()));
         if (pre.action === "block") return { ok: false, error: pre.message, code: "already_linked" };
+        if (!scope.isCurrent()) return { ok: false, error: "session_lost" };
         const row = await api.createWorkspace(token, name);
+        // The row exists for the original account; only that session may drive it.
+        if (!scope.isCurrent()) return { ok: true, data: row };
         handOff();
-        void startBootstrap(row.name);
+        void startBootstrap(row.name, scope);
         return { ok: true, data: row };
       } catch (err) {
         return apiFailure(err, "create_failed");
@@ -292,13 +296,14 @@ function registerIpcHandlers(): void {
   // Resume/retry for a row that exists but never came up: never creates a row.
   ipcMain.handle("aw:finishLocalSetup", async (_e, slug: string): Promise<ApiResult<null>> => {
     if (!currentToken) return { ok: false, error: "session_lost" };
-    return exclusive<ApiResult<null>>(setupSlot, BUSY, async (handOff) => {
+    return scopedExclusive<ApiResult<null>>(setupSlot, sessionScope, BUSY, async (scope, handOff) => {
       try {
         const tk = currentToken as string;
         const pre = await preflightFor(await readHostStatus(realHostOps()), slug, async (s) => (await api.getWorkspace(tk, s)).remote_host_id ?? null);
         if (pre.action === "block") return { ok: false, error: pre.message, code: "already_linked" };
+        if (!scope.isCurrent()) return { ok: false, error: "session_lost" };
         handOff();
-        void startBootstrap(slug);
+        void startBootstrap(slug, scope);
         return { ok: true, data: null };
       } catch (err) {
         return apiFailure(err, "setup_failed");

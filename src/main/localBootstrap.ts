@@ -29,8 +29,8 @@ export interface HostOps {
   installBinary(onLine: (l: string) => void): Promise<string>;
   /** Runs bootstrap-workspace; resolves the exit code. Token is passed via argv only. */
   runBootstrap(binary: string, token: string | null, controlPlane: string | undefined, onLine: (l: string) => void): Promise<number | null>;
-  /** Stops a running bootstrap child (deadline hit). */
-  killBootstrap(): void;
+  /** Stops the bootstrap child AND its descendants (installer scripts, curl), resolving once they are gone. */
+  killBootstrap(): Promise<void>;
 }
 
 export async function readHostStatus(ops: Pick<HostOps, "findBinary" | "hasCredentials" | "runStatus">): Promise<LocalHostStatus> {
@@ -145,7 +145,8 @@ async function runBounded(
   try {
     const r = await Promise.race([deps.ops.runBootstrap(binary, token, deps.controlPlane, onLine), timeout]);
     if (r === "timeout") {
-      deps.ops.killBootstrap();
+      // Retry must not start while the old installer tree could still write Podman files.
+      await deps.ops.killBootstrap();
       throw new Error(`aw-remote-host setup did not finish within ${Math.round(ms / 60000)} minutes (a download may have stalled). Retry to continue.`);
     }
     return r;
@@ -188,10 +189,16 @@ export async function exclusive<T>(slot: SetupSlot, busy: T, work: (handOff: () 
 /** Ties a setup job to the sign-in session that started it. `end()` (sign-out)
  * invalidates every job begun before it: they stop emitting, lose token access,
  * abort their poll and must not auto-open a workspace for whoever signs in next. */
+export interface SessionHandle {
+  isCurrent(): boolean;
+  signal: AbortSignal;
+  finish(): void;
+}
+
 export class SessionScope {
   private epoch = 0;
   private jobs = new Set<AbortController>();
-  begin(): { isCurrent(): boolean; signal: AbortSignal; finish(): void } {
+  begin(): SessionHandle {
     const epoch = this.epoch;
     const ac = new AbortController();
     this.jobs.add(ac);
@@ -206,6 +213,29 @@ export class SessionScope {
     for (const ac of this.jobs) ac.abort();
     this.jobs.clear();
   }
+}
+
+/** `exclusive` + a session handle begun SYNCHRONOUSLY at entry (before any
+ * await), so work that outlives a sign-out/sign-in is judged against the
+ * session that asked for it. The handle is finished unless `handOff()` ran. */
+export function scopedExclusive<T>(
+  slot: SetupSlot,
+  scope: SessionScope,
+  busy: T,
+  work: (session: SessionHandle, handOff: () => void) => Promise<T>,
+): Promise<T> {
+  return exclusive(slot, busy, async (slotHandOff) => {
+    const session = scope.begin();
+    let started = false;
+    try {
+      return await work(session, () => {
+        started = true;
+        slotHandOff();
+      });
+    } finally {
+      if (!started) session.finish();
+    }
+  });
 }
 
 /** One status poll bounded by the remaining budget: a request that stalls
@@ -350,12 +380,17 @@ export function realHostOps(): HostOps {
     runBootstrap: (binary, token, controlPlane, onLine) =>
       new Promise((resolve) => {
         const args = bootstrapArgs(token, controlPlane);
-        const child = spawn(binary, args, { stdio: ["ignore", "pipe", "pipe"], env: childEnv(process.env, homedir()) });
+        // detached => own process group, so the whole tree (bash installer, curl) can be killed.
+        const child = spawn(binary, args, { stdio: ["ignore", "pipe", "pipe"], env: childEnv(process.env, homedir()), detached: true });
         child.stdout.on("data", splitLines(onLine));
         child.stderr.on("data", splitLines(onLine));
         child.on("error", (e) => {
           onLine(`spawn failed: ${e.message}`);
           resolve(null);
+        });
+        activeDone = new Promise<void>((done) => {
+          child.on("close", () => done());
+          child.on("error", () => done());
         });
         child.on("close", (code) => resolve(code));
         activeChild = child;
@@ -365,12 +400,22 @@ export function realHostOps(): HostOps {
 }
 
 let activeChild: ReturnType<typeof spawn> | null = null;
+let activeDone: Promise<void> = Promise.resolve();
 
-/** App quit mid-bootstrap: stop the child. The server row stays, so the next
- * launch offers "Finish setup" and re-runs the (idempotent) bootstrap. */
-export function killActiveBootstrap(): void {
-  activeChild?.kill("SIGKILL");
+/** SIGKILL the child's whole process group (pid is the group leader because it
+ * was spawned detached), then wait (bounded) for it to exit. */
+export async function killActiveBootstrap(): Promise<void> {
+  const child = activeChild;
   activeChild = null;
+  if (!child?.pid) return;
+  try {
+    process.kill(-child.pid, "SIGKILL");
+  } catch {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // already gone
+    }
+  }
+  await Promise.race([activeDone, new Promise<void>((r) => setTimeout(r, 5000))]);
 }
-
-
