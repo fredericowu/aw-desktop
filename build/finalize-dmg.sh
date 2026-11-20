@@ -39,4 +39,13 @@ for f in "$DIST"/*.dmg "$DIST"/*.zip "$DIST"/*.zip.blockmap "$DIST"/latest-mac.y
   b="$(basename "$f")"
   cp "$f" "$stage/${b// /-}"
 done
-gh release upload "$TAG" "$stage"/* --clobber
+# Never replace live assets (a rerun must not break a working release): only
+# upload what the release does not have yet.
+existing="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
+for f in "$stage"/*; do
+  if grep -qxF "$(basename "$f")" <<<"$existing"; then
+    echo "skip (already published): $(basename "$f")"
+  else
+    gh release upload "$TAG" "$f"
+  fi
+done
