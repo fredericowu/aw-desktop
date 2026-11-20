@@ -35,20 +35,49 @@ function errorLimit(data: unknown): number | undefined {
   return undefined;
 }
 
+/** Every request, INCLUDING its body read, has a hard deadline: a response
+ * that sends headers and then stalls must not hang a caller forever (the
+ * local-setup slot is held across these calls). `signal` adds an earlier abort. */
+export const REQUEST_TIMEOUT_MS = 30_000;
+
+async function bounded<T>(signal: AbortSignal | undefined, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const ac = new AbortController();
+  const onAbort = () => ac.abort();
+  if (signal?.aborted) ac.abort();
+  signal?.addEventListener("abort", onAbort);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    ac.abort();
+  }, REQUEST_TIMEOUT_MS);
+  try {
+    return await run(ac.signal);
+  } catch (err) {
+    if (timedOut) throw new Error("request_timed_out");
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+
 async function post<T>(path: string, body: unknown, token?: string): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (token) headers.Authorization = `Bearer ${token}`;
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
+  return bounded(undefined, async (signal) => {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal,
+    });
+    const contentType = res.headers.get("content-type") || "";
+    const data = contentType.includes("application/json") ? await res.json() : await res.text();
+    if (!res.ok) {
+      throw new ApiError(res.status, errorMessage(data, res.status), errorCode(data), errorLimit(data));
+    }
+    return data as T;
   });
-  const contentType = res.headers.get("content-type") || "";
-  const data = contentType.includes("application/json") ? await res.json() : await res.text();
-  if (!res.ok) {
-    throw new ApiError(res.status, errorMessage(data, res.status), errorCode(data), errorLimit(data));
-  }
-  return data as T;
 }
 
 function errorMessage(data: unknown, status: number): string {
@@ -61,16 +90,18 @@ function errorMessage(data: unknown, status: number): string {
 }
 
 async function get<T>(path: string, token: string, signal?: AbortSignal): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    headers: { Authorization: `Bearer ${token}` },
-    signal,
+  return bounded(signal, async (sig) => {
+    const res = await fetch(`${API_BASE}${path}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: sig,
+    });
+    const contentType = res.headers.get("content-type") || "";
+    const data = contentType.includes("application/json") ? await res.json() : await res.text();
+    if (!res.ok) {
+      throw new ApiError(res.status, errorMessage(data, res.status), errorCode(data), errorLimit(data));
+    }
+    return data as T;
   });
-  const contentType = res.headers.get("content-type") || "";
-  const data = contentType.includes("application/json") ? await res.json() : await res.text();
-  if (!res.ok) {
-    throw new ApiError(res.status, errorMessage(data, res.status), errorCode(data), errorLimit(data));
-  }
-  return data as T;
 }
 
 export function login(email: string, password: string): Promise<TokenResponse> {

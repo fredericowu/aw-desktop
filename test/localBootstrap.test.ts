@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { SetupSlot, bootstrapArgs, exclusive, readHostStatus, runBootstrapFlow, type FlowDeps, type HostOps } from "../src/main/localBootstrap";
+import { SetupSlot, bootstrapArgs, childEnv, exclusive, readHostStatus, runBootstrapFlow, type FlowDeps, type HostOps } from "../src/main/localBootstrap";
 import type { BootstrapProgress } from "../src/shared/types";
 
 function ops(over: Partial<HostOps> = {}): HostOps {
@@ -170,6 +170,20 @@ describe("bootstrapArgs", () => {
       "--token", "awbs_x", "--control-plane", "https://api.self.example",
     ]);
     expect(bootstrapArgs(null)).toEqual(["bootstrap-workspace", "--with-workspace", "--yes", "--background"]);
+  });
+});
+
+describe("childEnv", () => {
+  it("gives the CLI the dirs where Desktop's runtime probe finds Podman", () => {
+    const env = childEnv({ PATH: "/usr/bin:/bin" }, "/Users/me");
+    const dirs = env.PATH!.split(":");
+    expect(dirs).toEqual(expect.arrayContaining(["/opt/homebrew/bin", "/usr/local/bin", "/Users/me/podman-dist/podman/bin", "/Users/me/.local/bin"]));
+    expect(dirs.slice(-2)).toEqual(["/usr/bin", "/bin"]);
+  });
+  it("does not duplicate dirs already on PATH and keeps other vars", () => {
+    const env = childEnv({ PATH: "/opt/homebrew/bin:/usr/bin", HOME: "/Users/me" }, "/Users/me");
+    expect(env.PATH!.split(":").filter((d) => d === "/opt/homebrew/bin").length).toBe(1);
+    expect(env.HOME).toBe("/Users/me");
   });
 });
 

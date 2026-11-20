@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { accountMe, ApiError, createWorkspace, listWorkspaces } from "../src/main/apiClient";
+import { accountMe, ApiError, createWorkspace, listWorkspaces, mintBootstrapToken, REQUEST_TIMEOUT_MS } from "../src/main/apiClient";
 
 function mockFetch(status: number, body: unknown) {
   const fn = vi.fn(async () => ({
@@ -46,5 +46,40 @@ describe("authed workspace calls", () => {
   it("accountMe returns limits + local_count", async () => {
     mockFetch(200, { limits: { max_local_workspaces: 2 }, local_count: 1 });
     expect(await accountMe("tok")).toMatchObject({ local_count: 1 });
+  });
+});
+
+describe("request deadline", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("a token POST whose body stalls after headers rejects instead of hanging", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_u: string, init: RequestInit) =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: { get: () => "application/json" },
+          // headers arrived; the body never completes unless the request is aborted
+          json: () =>
+            new Promise((_r, rej) => init.signal!.addEventListener("abort", () => rej(new Error("aborted")))),
+        }),
+      ),
+    );
+    const p = mintBootstrapToken("tok", "w").catch((e) => e);
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
+    expect(await p).toMatchObject({ message: "request_timed_out" });
+  });
+
+  it("a request that never answers at all also times out", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_u: string, init: RequestInit) => new Promise((_r, rej) => init.signal!.addEventListener("abort", () => rej(new Error("aborted"))))),
+    );
+    const p = createWorkspace("tok", "w").catch((e) => e);
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
+    expect(await p).toMatchObject({ message: "request_timed_out" });
   });
 });

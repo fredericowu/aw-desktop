@@ -175,6 +175,22 @@ function splitLines(onLine: (l: string) => void): (chunk: Buffer) => void {
   };
 }
 
+/** PATH for the bootstrap child. A Finder-launched app gets a bare PATH, so a
+ * Homebrew/vendored Podman that Desktop already detected (by absolute path)
+ * would be invisible to the CLI's by-name lookup and it would download a second
+ * copy. Prepend the same locations runtimeProbe checks. */
+export function childEnv(env: NodeJS.ProcessEnv, home: string): NodeJS.ProcessEnv {
+  const extra = [
+    `${home}/.local/bin`,
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/opt/podman/bin",
+    `${home}/podman-dist/podman/bin`,
+  ];
+  const have = (env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin").split(":");
+  return { ...env, PATH: [...extra.filter((d) => !have.includes(d)), ...have].join(":") };
+}
+
 /** argv for the CLI. The CLI defaults to the hosted control plane; a
  * self-hosted desktop (AW_DESKTOP_APEX) must hand it the one the token was
  * minted against, or the token goes to the wrong deployment. */
@@ -231,7 +247,7 @@ export function realHostOps(): HostOps {
     runBootstrap: (binary, token, controlPlane, onLine) =>
       new Promise((resolve) => {
         const args = bootstrapArgs(token, controlPlane);
-        const child = spawn(binary, args, { stdio: ["ignore", "pipe", "pipe"] });
+        const child = spawn(binary, args, { stdio: ["ignore", "pipe", "pipe"], env: childEnv(process.env, homedir()) });
         child.stdout.on("data", splitLines(onLine));
         child.stderr.on("data", splitLines(onLine));
         child.on("error", (e) => {
