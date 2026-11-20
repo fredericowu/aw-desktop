@@ -1,5 +1,5 @@
 import { app, ipcMain, powerMonitor, BrowserWindow, Menu } from "electron";
-import { APEX, CONSOLE_BASE, workspaceUrl } from "./config";
+import { API_BASE, APEX, CONSOLE_BASE, workspaceUrl } from "./config";
 import * as api from "./apiClient";
 import { ApiError } from "./apiClient";
 import { loadToken, saveToken, clearToken } from "./authStore";
@@ -8,8 +8,8 @@ import { registerProtocolHandler, startGoogleSignInHandoff } from "./oauth";
 import { createAuthWindow, createShellWindow } from "./windows";
 import { checkForUpdates } from "./updater";
 import { probeRuntimes } from "./runtimeProbe";
-import { killActiveBootstrap, readHostStatus, realHostOps, runBootstrapFlow } from "./localBootstrap";
-import { decidePreflight } from "./bootstrapCore";
+import { SetupSlot, exclusive, killActiveBootstrap, readHostStatus, realHostOps, runBootstrapFlow } from "./localBootstrap";
+import { decidePreflight, fail, startProgress } from "./bootstrapCore";
 import type { ApiResult, AuthState, AwUser, BootstrapProgress, WorkspaceInfo, WorkspaceListData } from "../shared/types";
 
 // macOS only (Phase 1, per Architect design) — a second instance just
@@ -27,13 +27,19 @@ let shellWindow: BrowserWindow | null = null;
 let currentToken: string | null = null;
 
 let bootstrapProgress: BootstrapProgress | null = null;
-let bootstrapRunning = false;
+const setupSlot = new SetupSlot();
 
 let state: AuthState = { stage: "splash", user: null, error: null, apex: APEX };
 
+/** macOS keeps the app alive after the picker window is closed, leaving
+ * `authWindow` pointing at a destroyed window: every send/hide must go through this. */
+function liveAuthWindow(): BrowserWindow | null {
+  return authWindow && !authWindow.isDestroyed() ? authWindow : null;
+}
+
 function setState(partial: Partial<AuthState>): void {
   state = { ...state, ...partial };
-  authWindow?.webContents.send("aw:state-changed", state);
+  liveAuthWindow()?.webContents.send("aw:state-changed", state);
 }
 
 function teardownToLogin(error: string | null = null): void {
@@ -58,7 +64,7 @@ async function openWorkspace(slug: string): Promise<void> {
   if (!currentToken) return teardownToLogin("session_lost");
   setState({ stage: "loading-workspace", error: null });
   await injectIdentityCookie(currentToken);
-  authWindow?.hide();
+  liveAuthWindow()?.hide();
   shellWindow = createShellWindow(workspaceUrl(slug));
   watchForSessionExpiry(shellWindow);
 }
@@ -134,11 +140,15 @@ function apiFailure<T>(err: unknown, fallback: string): ApiResult<T> {
 
 function emitBootstrap(p: BootstrapProgress): void {
   bootstrapProgress = p;
-  authWindow?.webContents.send("aw:bootstrap-progress", p);
+  try {
+    liveAuthWindow()?.webContents.send("aw:bootstrap-progress", p);
+  } catch {
+    // The picker window can vanish mid-send; setup must keep running.
+  }
 }
 
+/** Caller must already hold the slot; this releases it. */
 async function startBootstrap(slug: string): Promise<void> {
-  bootstrapRunning = true;
   try {
     const result = await runBootstrapFlow(slug, {
       ops: realHostOps(),
@@ -147,17 +157,24 @@ async function startBootstrap(slug: string): Promise<void> {
         if (!currentToken) throw new Error("session_lost");
         return (await api.mintBootstrapToken(currentToken, s)).token;
       },
-      getStatus: async (s) => {
+      getStatus: async (s, signal) => {
         if (!currentToken) throw new Error("session_lost");
-        return (await api.getWorkspace(currentToken, s)).status;
+        return (await api.getWorkspace(currentToken, s, signal)).status;
       },
+      controlPlane: API_BASE,
       emit: emitBootstrap,
       sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
       now: () => Date.now(),
     });
-    if (result.phase === "done") await openWorkspace(slug);
+    if (result.phase === "done") {
+      await openWorkspace(slug);
+      // A done snapshot must not resurface when the picker is shown again.
+      bootstrapProgress = null;
+    }
+  } catch (err) {
+    emitBootstrap(fail(bootstrapProgress ?? startProgress(slug), err instanceof Error ? err.message : String(err)));
   } finally {
-    bootstrapRunning = false;
+    setupSlot.release();
   }
 }
 
@@ -244,28 +261,39 @@ function registerIpcHandlers(): void {
   // Pre-flight FIRST: a Mac that already hosts a workspace is refused before
   // a row exists or a token is minted. Then the REAL BYOD row, then the
   // bootstrap runs in the background (progress over aw:bootstrap-progress).
+  const BUSY = { ok: false, error: "A setup is already running on this Mac.", code: "bootstrap_running" } as const;
+
   ipcMain.handle("aw:createLocalWorkspace", async (_e, name: string): Promise<ApiResult<WorkspaceInfo>> => {
     if (!currentToken) return { ok: false, error: "session_lost" };
-    if (bootstrapRunning) return { ok: false, error: "A setup is already running on this Mac.", code: "bootstrap_running" };
-    const pre = decidePreflight(await readHostStatus(realHostOps()));
-    if (pre.action === "block") return { ok: false, error: pre.message, code: "already_linked" };
-    try {
-      const row = await api.createWorkspace(currentToken, name);
-      void startBootstrap(row.name);
-      return { ok: true, data: row };
-    } catch (err) {
-      return apiFailure(err, "create_failed");
-    }
+    const token = currentToken;
+    return exclusive<ApiResult<WorkspaceInfo>>(setupSlot, BUSY, async (handOff) => {
+      try {
+        const pre = decidePreflight(await readHostStatus(realHostOps()));
+        if (pre.action === "block") return { ok: false, error: pre.message, code: "already_linked" };
+        const row = await api.createWorkspace(token, name);
+        handOff();
+        void startBootstrap(row.name);
+        return { ok: true, data: row };
+      } catch (err) {
+        return apiFailure(err, "create_failed");
+      }
+    });
   });
 
   // Resume/retry for a row that exists but never came up: never creates a row.
   ipcMain.handle("aw:finishLocalSetup", async (_e, slug: string): Promise<ApiResult<null>> => {
     if (!currentToken) return { ok: false, error: "session_lost" };
-    if (bootstrapRunning) return { ok: false, error: "A setup is already running on this Mac.", code: "bootstrap_running" };
-    const pre = decidePreflight(await readHostStatus(realHostOps()), slug);
-    if (pre.action === "block") return { ok: false, error: pre.message, code: "already_linked" };
-    void startBootstrap(slug);
-    return { ok: true, data: null };
+    return exclusive<ApiResult<null>>(setupSlot, BUSY, async (handOff) => {
+      try {
+        const pre = decidePreflight(await readHostStatus(realHostOps()), slug);
+        if (pre.action === "block") return { ok: false, error: pre.message, code: "already_linked" };
+        handOff();
+        void startBootstrap(slug);
+        return { ok: true, data: null };
+      } catch (err) {
+        return apiFailure(err, "setup_failed");
+      }
+    });
   });
 
   ipcMain.handle("aw:logout", () => logout());

@@ -118,6 +118,30 @@ describe("Picker landing", () => {
     expect(screen.getByTestId("remote-away").textContent).toContain("Runs on another machine");
   });
 
+  it("a done snapshot from main does not resurface the ready modal when the picker remounts", async () => {
+    bridge({
+      getBootstrapProgress: vi.fn(async (): Promise<BootstrapProgress | null> => ({
+        slug: "mine", phase: "done", step: "running", done: [], lines: [],
+      })),
+    });
+    render(<Picker state={state} />);
+    await screen.findByTestId("local-block");
+    expect(screen.queryByTestId("bootstrap-progress")).toBeNull();
+  });
+
+  it("Retry shows the refusal when it fails before emitting progress", async () => {
+    const b = bridge({
+      finishLocalSetup: vi.fn(async () => ({ ok: false, code: "already_linked", error: "This Mac already hosts a workspace." })),
+    });
+    render(<Picker state={state} />);
+    await screen.findByTestId("local-block");
+    emitProgress({ slug: "mine", phase: "failed", step: "podman", done: [], failedStep: "podman", error: "boom", lines: [] });
+    fireEvent.click(await screen.findByText("Retry"));
+    const msg = await screen.findByTestId("retry-error");
+    expect(msg.textContent).toContain("already hosts a workspace");
+    expect(b.finishLocalSetup).toHaveBeenCalledWith("mine");
+  });
+
   it("bootstrap failure shows the failing step and last log lines, with Retry", async () => {
     const b = bridge();
     render(<Picker state={state} />);

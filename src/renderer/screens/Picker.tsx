@@ -43,7 +43,7 @@ export function Picker({ state }: { state: AuthState }) {
   // Re-sync with a bootstrap that is already running (e.g. window re-opened)
   // and follow its live progress.
   useEffect(() => {
-    void window.aw.getBootstrapProgress().then((p) => p && setProgress(p));
+    void window.aw.getBootstrapProgress().then((p) => p && p.phase !== "done" && setProgress(p));
     return window.aw.onBootstrapProgress(setProgress);
   }, []);
 
@@ -185,7 +185,10 @@ export function Picker({ state }: { state: AuthState }) {
       {progress && (
         <ProgressModal
           progress={progress}
-          onRetry={() => void window.aw.finishLocalSetup(progress.slug)}
+          onRetry={async () => {
+            const r = await window.aw.finishLocalSetup(progress.slug);
+            return r.ok ? null : (r.error ?? "Could not restart setup.");
+          }}
           onClose={() => {
             setProgress(null);
             void refresh();
@@ -267,10 +270,12 @@ function ProgressModal({
   onClose,
 }: {
   progress: BootstrapProgress;
-  onRetry: () => void;
+  /** Resolves an error message when the retry was refused before any progress was emitted. */
+  onRetry: () => Promise<string | null>;
   onClose: () => void;
 }) {
   const failed = progress.phase === "failed";
+  const [retryError, setRetryError] = useState<string | null>(null);
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true" data-testid="bootstrap-progress">
       <div className="card modal">
@@ -292,7 +297,14 @@ function ProgressModal({
               Failed at: {progress.failedStep ? STEP_LABEL[progress.failedStep] : "setup"}. {progress.error}
             </span>
             <pre className="dim" data-testid="bootstrap-log">{progress.lines.slice(-8).join("\n")}</pre>
-            <button className="primary" onClick={onRetry}>
+            {retryError && <span className="error" data-testid="retry-error">{retryError}</span>}
+            <button
+              className="primary"
+              onClick={async () => {
+                setRetryError(null);
+                setRetryError(await onRetry());
+              }}
+            >
               Retry
             </button>
             <button className="link" onClick={onClose}>

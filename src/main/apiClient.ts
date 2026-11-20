@@ -60,9 +60,10 @@ function errorMessage(data: unknown, status: number): string {
   return `Request failed with status ${status}`;
 }
 
-async function get<T>(path: string, token: string): Promise<T> {
+async function get<T>(path: string, token: string, signal?: AbortSignal): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     headers: { Authorization: `Bearer ${token}` },
+    signal,
   });
   const contentType = res.headers.get("content-type") || "";
   const data = contentType.includes("application/json") ? await res.json() : await res.text();
@@ -124,8 +125,8 @@ export function mintBootstrapToken(token: string, slug: string): Promise<{ token
 }
 
 /** GET /api/workspaces/{slug} — detail row; `status` flips to running once linked + up. */
-export function getWorkspace(token: string, slug: string): Promise<WorkspaceInfo> {
-  return get<WorkspaceInfo>(`/api/workspaces/${encodeURIComponent(slug)}`, token);
+export function getWorkspace(token: string, slug: string, signal?: AbortSignal): Promise<WorkspaceInfo> {
+  return get<WorkspaceInfo>(`/api/workspaces/${encodeURIComponent(slug)}`, token, signal);
 }
 
 export async function refresh(token: string): Promise<TokenResponse> {

@@ -28,7 +28,7 @@ export interface HostOps {
   /** Download+verify+install the pinned release; returns the installed path. */
   installBinary(onLine: (l: string) => void): Promise<string>;
   /** Runs bootstrap-workspace; resolves the exit code. Token is passed via argv only. */
-  runBootstrap(binary: string, token: string | null, onLine: (l: string) => void): Promise<number | null>;
+  runBootstrap(binary: string, token: string | null, controlPlane: string | undefined, onLine: (l: string) => void): Promise<number | null>;
 }
 
 export async function readHostStatus(ops: Pick<HostOps, "findBinary" | "hasCredentials" | "runStatus">): Promise<LocalHostStatus> {
@@ -45,7 +45,10 @@ export async function readHostStatus(ops: Pick<HostOps, "findBinary" | "hasCrede
 export interface FlowDeps {
   ops: HostOps;
   mintToken(slug: string): Promise<string>;
-  getStatus(slug: string): Promise<string>;
+  /** Must honour `signal`; the flow also races it against the deadline. */
+  getStatus(slug: string, signal: AbortSignal): Promise<string>;
+  /** Control plane the token was minted against; passed to the CLI as --control-plane. */
+  controlPlane?: string;
   emit(p: BootstrapProgress): void;
   sleep(ms: number): Promise<void>;
   now(): number;
@@ -83,7 +86,7 @@ export async function runBootstrapFlow(slug: string, deps: FlowDeps): Promise<Bo
     }
 
     push(advance(p, "link"));
-    const code = await deps.ops.runBootstrap(binary, token, line);
+    const code = await deps.ops.runBootstrap(binary, token, deps.controlPlane, line);
     token = null;
     if (code !== 0) throw new Error(`aw-remote-host bootstrap-workspace exited with ${code === null ? "an error" : `code ${code}`}`);
 
@@ -92,7 +95,7 @@ export async function runBootstrapFlow(slug: string, deps: FlowDeps): Promise<Bo
     const deadline = deps.now() + (deps.pollTimeoutMs ?? POLL_TIMEOUT_MS);
     for (;;) {
       if (deps.signal?.aborted) throw new Error("cancelled");
-      const status = await deps.getStatus(slug).catch(() => "");
+      const status = await pollOnce(deps, slug, deadline - deps.now());
       if (status === "running") break;
       if (deps.now() > deadline) throw new Error(`workspace did not reach running (last status: ${status || "unknown"})`);
       await deps.sleep(interval);
@@ -102,6 +105,56 @@ export async function runBootstrapFlow(slug: string, deps: FlowDeps): Promise<Bo
     push(fail(p, err instanceof Error ? err.message : String(err)));
   }
   return p;
+}
+
+/** Single-flight slot for "a setup is running on this Mac". */
+export class SetupSlot {
+  private busy = false;
+  claim(): boolean {
+    if (this.busy) return false;
+    this.busy = true;
+    return true;
+  }
+  release(): void {
+    this.busy = false;
+  }
+  get isBusy(): boolean {
+    return this.busy;
+  }
+}
+
+/** Claims the slot SYNCHRONOUSLY (before any await), runs `work`, and releases
+ * on every exit unless `work` called `handOff()` (the background bootstrap then
+ * owns the slot and must release it). Two rapid calls can never both pass. */
+export async function exclusive<T>(slot: SetupSlot, busy: T, work: (handOff: () => void) => Promise<T>): Promise<T> {
+  if (!slot.claim()) return busy;
+  let handedOff = false;
+  try {
+    return await work(() => {
+      handedOff = true;
+    });
+  } finally {
+    if (!handedOff) slot.release();
+  }
+}
+
+/** One status poll bounded by the remaining budget: a request that stalls
+ * after headers (or a dep that ignores the signal) cannot wedge the loop. */
+async function pollOnce(deps: FlowDeps, slug: string, remainingMs: number): Promise<string> {
+  const budget = Math.max(1, Math.min(remainingMs, 30_000));
+  const ac = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<string>((resolve) => {
+    timer = setTimeout(() => {
+      ac.abort();
+      resolve("");
+    }, budget);
+  });
+  try {
+    return await Promise.race([deps.getStatus(slug, ac.signal).catch(() => ""), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ---- real implementation -------------------------------------------------
@@ -120,6 +173,16 @@ function splitLines(onLine: (l: string) => void): (chunk: Buffer) => void {
     buf = parts.pop() ?? "";
     for (const l of parts) onLine(l);
   };
+}
+
+/** argv for the CLI. The CLI defaults to the hosted control plane; a
+ * self-hosted desktop (AW_DESKTOP_APEX) must hand it the one the token was
+ * minted against, or the token goes to the wrong deployment. */
+export function bootstrapArgs(token: string | null, controlPlane?: string): string[] {
+  const args = ["bootstrap-workspace", "--with-workspace", "--yes", "--background"];
+  if (token) args.push("--token", token);
+  if (controlPlane) args.push("--control-plane", controlPlane);
+  return args;
 }
 
 export function realHostOps(): HostOps {
@@ -165,10 +228,9 @@ export function realHostOps(): HostOps {
         rmSync(dir, { recursive: true, force: true });
       }
     },
-    runBootstrap: (binary, token, onLine) =>
+    runBootstrap: (binary, token, controlPlane, onLine) =>
       new Promise((resolve) => {
-        const args = ["bootstrap-workspace", "--with-workspace", "--yes", "--background"];
-        if (token) args.push("--token", token);
+        const args = bootstrapArgs(token, controlPlane);
         const child = spawn(binary, args, { stdio: ["ignore", "pipe", "pipe"] });
         child.stdout.on("data", splitLines(onLine));
         child.stderr.on("data", splitLines(onLine));

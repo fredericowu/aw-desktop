@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { readHostStatus, runBootstrapFlow, type FlowDeps, type HostOps } from "../src/main/localBootstrap";
+import { SetupSlot, bootstrapArgs, exclusive, readHostStatus, runBootstrapFlow, type FlowDeps, type HostOps } from "../src/main/localBootstrap";
 import type { BootstrapProgress } from "../src/shared/types";
 
 function ops(over: Partial<HostOps> = {}): HostOps {
@@ -8,7 +8,7 @@ function ops(over: Partial<HostOps> = {}): HostOps {
     hasCredentials: () => false,
     runStatus: async () => "linked: no (no credentials found)",
     installBinary: vi.fn(async () => "/home/.local/bin/aw-remote-host"),
-    runBootstrap: vi.fn(async (_b, _t, onLine) => {
+    runBootstrap: vi.fn(async (_b, _t, _cp, onLine) => {
       onLine("podman: installed and verified");
       return 0;
     }),
@@ -53,7 +53,7 @@ describe("runBootstrapFlow", () => {
     const p = await runBootstrapFlow("w", d);
     expect(p.phase).toBe("done");
     expect(d.mintToken).toHaveBeenCalledWith("w");
-    expect(o.runBootstrap).toHaveBeenCalledWith("/bin/arh", "awbs_secret_token", expect.any(Function));
+    expect(o.runBootstrap).toHaveBeenCalledWith("/bin/arh", "awbs_secret_token", undefined, expect.any(Function));
     expect(JSON.stringify(events)).not.toContain("awbs_secret_token");
   });
 
@@ -62,7 +62,7 @@ describe("runBootstrapFlow", () => {
     const { d } = deps(o);
     await runBootstrapFlow("w", d);
     expect(o.installBinary).toHaveBeenCalledTimes(1);
-    expect(o.runBootstrap).toHaveBeenCalledWith("/home/.local/bin/aw-remote-host", "awbs_secret_token", expect.any(Function));
+    expect(o.runBootstrap).toHaveBeenCalledWith("/home/.local/bin/aw-remote-host", "awbs_secret_token", undefined, expect.any(Function));
   });
 
   it("already-linked Mac: blocks BEFORE minting a token or running bootstrap", async () => {
@@ -81,12 +81,12 @@ describe("runBootstrapFlow", () => {
     const p = await runBootstrapFlow("w", d);
     expect(p.phase).toBe("done");
     expect(d.mintToken).not.toHaveBeenCalled();
-    expect(o.runBootstrap).toHaveBeenCalledWith("/bin/arh", null, expect.any(Function));
+    expect(o.runBootstrap).toHaveBeenCalledWith("/bin/arh", null, undefined, expect.any(Function));
   });
 
   it("CLI failure reports the failing step and the last log lines", async () => {
     const o = ops({
-      runBootstrap: async (_b, _t, onLine) => {
+      runBootstrap: async (_b, _t, _cp, onLine) => {
         onLine("podman: FAILED");
         onLine("machine init: no space left");
         return 1;
@@ -124,5 +124,83 @@ describe("runBootstrapFlow", () => {
     const { d } = deps(ops(), { mintToken: async () => { throw new Error("forbidden"); } });
     const p = await runBootstrapFlow("w", d);
     expect(p).toMatchObject({ phase: "failed", failedStep: "token" });
+  });
+});
+
+describe("review-fix regressions", () => {
+  it("passes the desktop's control plane to the CLI (self-hosted apex)", async () => {
+    const o = ops();
+    const { d } = deps(o, { controlPlane: "https://api.self.example" });
+    await runBootstrapFlow("w", d);
+    expect(o.runBootstrap).toHaveBeenCalledWith("/bin/arh", "awbs_secret_token", "https://api.self.example", expect.any(Function));
+  });
+
+  it("a status request that never settles cannot wedge the poll loop", async () => {
+    const { d } = deps(ops(), {
+      getStatus: () => new Promise<string>(() => undefined),
+      now: () => Date.now(),
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      pollIntervalMs: 5,
+      pollTimeoutMs: 150,
+    });
+    const p = await runBootstrapFlow("w", d);
+    expect(p.phase).toBe("failed");
+    expect(p.error).toContain("did not reach running");
+  });
+
+  it("the status request is aborted when its budget runs out", async () => {
+    let aborted = false;
+    const { d } = deps(ops(), {
+      getStatus: (_s, signal) =>
+        new Promise<string>((_r, rej) => signal.addEventListener("abort", () => { aborted = true; rej(new Error("aborted")); })),
+      now: () => Date.now(),
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      pollIntervalMs: 5,
+      pollTimeoutMs: 100,
+    });
+    await runBootstrapFlow("w", d);
+    expect(aborted).toBe(true);
+  });
+});
+
+describe("bootstrapArgs", () => {
+  it("includes --control-plane when given, and --token only when minted", () => {
+    expect(bootstrapArgs("awbs_x", "https://api.self.example")).toEqual([
+      "bootstrap-workspace", "--with-workspace", "--yes", "--background",
+      "--token", "awbs_x", "--control-plane", "https://api.self.example",
+    ]);
+    expect(bootstrapArgs(null)).toEqual(["bootstrap-workspace", "--with-workspace", "--yes", "--background"]);
+  });
+});
+
+describe("exclusive (single-flight setup slot)", () => {
+  it("two rapid calls while the first awaits preflight: only one runs", async () => {
+    const slot = new SetupSlot();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const ran = vi.fn();
+    const work = async (handOff: () => void) => {
+      await gate; // pending host probe
+      ran();
+      handOff();
+      return "started";
+    };
+    const first = exclusive(slot, "busy", work);
+    const second = exclusive(slot, "busy", work);
+    expect(await second).toBe("busy");
+    release();
+    expect(await first).toBe("started");
+    expect(ran).toHaveBeenCalledTimes(1);
+    expect(slot.isBusy).toBe(true); // handed off: the background run owns it
+    slot.release();
+    expect(slot.isBusy).toBe(false);
+  });
+
+  it("releases the slot when work is refused or throws (never handed off)", async () => {
+    const slot = new SetupSlot();
+    expect(await exclusive(slot, "busy", async () => "refused")).toBe("refused");
+    expect(slot.isBusy).toBe(false);
+    await expect(exclusive(slot, "busy", async () => { throw new Error("x"); })).rejects.toThrow("x");
+    expect(slot.isBusy).toBe(false);
   });
 });
