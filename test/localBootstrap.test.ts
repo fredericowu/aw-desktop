@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import { SetupSlot, bootstrapArgs, childEnv, exclusive, readHostStatus, runBootstrapFlow, type FlowDeps, type HostOps } from "../src/main/localBootstrap";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { SetupSlot, bootstrapArgs, childEnv, fetchBytes, exclusive, readHostStatus, runBootstrapFlow, type FlowDeps, type HostOps } from "../src/main/localBootstrap";
 import type { BootstrapProgress } from "../src/shared/types";
 
 function ops(over: Partial<HostOps> = {}): HostOps {
@@ -216,5 +216,28 @@ describe("exclusive (single-flight setup slot)", () => {
     expect(slot.isBusy).toBe(false);
     await expect(exclusive(slot, "busy", async () => { throw new Error("x"); })).rejects.toThrow("x");
     expect(slot.isBusy).toBe(false);
+  });
+});
+
+describe("fetchBytes", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("returns the body on success and throws on a non-2xx", async () => {
+    const ok = vi.fn(async () => ({ ok: true, status: 200, arrayBuffer: async () => new Uint8Array([1, 2]).buffer }));
+    expect(Array.from(await fetchBytes("u", ok as unknown as typeof fetch))).toEqual([1, 2]);
+    const bad = vi.fn(async () => ({ ok: false, status: 404, arrayBuffer: async () => new ArrayBuffer(0) }));
+    await expect(fetchBytes("u", bad as unknown as typeof fetch)).rejects.toThrow("404");
+  });
+
+  it("a body that trickles forever is aborted at the deadline", async () => {
+    vi.useFakeTimers();
+    const stall = vi.fn(async (_u: string, init: RequestInit) => ({
+      ok: true,
+      status: 200,
+      arrayBuffer: () => new Promise<ArrayBuffer>((_r, rej) => init.signal!.addEventListener("abort", () => rej(new Error("aborted")))),
+    }));
+    const p = fetchBytes("https://x/y.tgz", stall as unknown as typeof fetch, 1000).catch((e) => e);
+    await vi.advanceTimersByTimeAsync(1001);
+    expect(await p).toMatchObject({ message: expect.stringContaining("timed out") });
   });
 });

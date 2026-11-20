@@ -175,6 +175,34 @@ function splitLines(onLine: (l: string) => void): (chunk: Buffer) => void {
   };
 }
 
+export const DOWNLOAD_TIMEOUT_MS = 120_000;
+
+/** Download with a hard deadline covering the body read: a release response
+ * that trickles bytes forever must fail (so Retry is offered) rather than
+ * hold the setup slot until Desktop restarts. */
+export async function fetchBytes(
+  url: string,
+  fetchFn: typeof fetch = fetch,
+  timeoutMs = DOWNLOAD_TIMEOUT_MS,
+): Promise<Uint8Array> {
+  const ac = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    ac.abort();
+  }, timeoutMs);
+  try {
+    const res = await fetchFn(url, { signal: ac.signal });
+    if (!res.ok) throw new Error(`download failed (${res.status}) for ${url}`);
+    return new Uint8Array(await res.arrayBuffer());
+  } catch (err) {
+    if (timedOut) throw new Error(`download timed out for ${url}`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** PATH for the bootstrap child. A Finder-launched app gets a bare PATH, so a
  * Homebrew/vendored Podman that Desktop already detected (by absolute path)
  * would be invisible to the CLI's by-name lookup and it would download a second
@@ -218,11 +246,7 @@ export function realHostOps(): HostOps {
       const version = AW_REMOTE_HOST_VERSION;
       const asset = assetName(version, process.platform, process.arch);
       onLine(`aw-remote-host: downloading ${asset} (${version})`);
-      const fetchBuf = async (url: string) => {
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`download failed (${res.status}) for ${url}`);
-        return new Uint8Array(await res.arrayBuffer());
-      };
+      const fetchBuf = (url: string) => fetchBytes(url);
       const tarball = await fetchBuf(releaseUrl(version, asset));
       const checksums = Buffer.from(await fetchBuf(releaseUrl(version, "checksums.txt"))).toString("utf8");
       onLine("aw-remote-host: verifying checksum");
