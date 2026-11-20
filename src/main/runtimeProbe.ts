@@ -45,7 +45,11 @@ const DOCKER_APP_BUNDLES = (home: string) => [
 ];
 
 function runningArgs(kind: RuntimeKind): string[] {
-  return kind === "colima" ? ["status"] : ["info"];
+  if (kind === "colima") return ["status"];
+  // Pin Docker Desktop's own engine: a bare `docker info` follows the active
+  // context and can succeed against a remote engine while Desktop is stopped.
+  if (kind === "docker-desktop") return ["--context", "desktop-linux", "info"];
+  return ["info"];
 }
 
 async function probeOne(kind: RuntimeKind, deps: ProbeDeps): Promise<RuntimeStatus> {

@@ -91,6 +91,41 @@ describe("Picker landing", () => {
   });
 });
 
+describe("review fixes", () => {
+  it("without an authoritative local_count (shared rows visible) the server decides, no client gate", async () => {
+    const b = bridge({
+      workspaces: [ws({ name: "a" }), ws({ name: "b" })],
+      listWorkspaces: vi.fn(async (): Promise<ApiResult<WorkspaceListData>> => ({
+        ok: true,
+        data: { workspaces: [ws({ name: "a" }), ws({ name: "b" })], account: null },
+      })),
+    });
+    render(<Picker state={state} />);
+    const local = await screen.findByTestId("local-block");
+    fireEvent.click(local.querySelector(":scope > button")!);
+    await waitFor(() => expect(b.checkRuntime).toHaveBeenCalled());
+    expect(screen.queryByText("You've hit your free-tier limit")).toBeNull();
+  });
+
+  it("Cancel is disabled while a create request is pending", async () => {
+    let release!: (r: ApiResult<WorkspaceInfo>) => void;
+    const b = bridge({
+      checkRuntime: vi.fn(async () => found),
+      createLocalWorkspace: vi.fn(() => new Promise<ApiResult<WorkspaceInfo>>((r) => (release = r))),
+    });
+    render(<Picker state={state} />);
+    const local = await screen.findByTestId("local-block");
+    fireEvent.click(local.querySelector(":scope > button")!);
+    await waitFor(() => expect(b.checkRuntime).toHaveBeenCalled());
+    fireEvent.click(await screen.findByText("Continue"));
+    fireEvent.change(screen.getByPlaceholderText("my-sandbox"), { target: { value: "x" } });
+    fireEvent.click(screen.getByText("Create sandbox"));
+    await screen.findByText("Creating…");
+    expect((screen.getByText("Cancel") as HTMLButtonElement).disabled).toBe(true);
+    release({ ok: true, data: ws({ name: "x" }) });
+  });
+});
+
 describe("guided create", () => {
   async function openWizard(b: ReturnType<typeof bridge>) {
     render(<Picker state={state} />);

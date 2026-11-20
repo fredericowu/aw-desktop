@@ -55,11 +55,14 @@ export function Picker({ state }: { state: AuthState }) {
   const limit = ready?.account?.limits?.max_local_workspaces ?? DEFAULT_LOCAL_LIMIT;
   // The server count is authoritative (it counts only OWNED local rows);
   // fall back to what we can see when the backend predates local_count.
-  const localCount = ready?.account?.local_count ?? local.length;
+  const serverCount = ready?.account?.local_count;
+  const localCount = serverCount ?? local.length;
 
   function onCreateLocal() {
     // Cap gate first: no runtime check, no API call when already at the cap.
-    if (localCount >= limit) setModal({ kind: "limit", limit });
+    // Only gate on the authoritative owned count: the list also holds shared
+    // memberships, so without it the server decides (402 -> limit modal).
+    if (serverCount !== undefined && serverCount >= limit) setModal({ kind: "limit", limit });
     else setModal({ kind: "wizard" });
   }
 
@@ -323,7 +326,7 @@ function CreateWizard({
             </button>
           </>
         )}
-        <button className="link" onClick={onClose}>
+        <button className="link" disabled={busy} onClick={onClose}>
           Cancel
         </button>
       </div>

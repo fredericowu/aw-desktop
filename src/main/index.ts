@@ -18,6 +18,7 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 const REFRESH_INTERVAL_MS = 30 * 60 * 1000;
+const ACCOUNT_TIMEOUT_MS = 4000;
 
 let authWindow: BrowserWindow | null = null;
 let shellWindow: BrowserWindow | null = null;
@@ -191,7 +192,10 @@ function registerIpcHandlers(): void {
       const workspaces = await api.listWorkspaces(currentToken);
       // limits/local_count only exist on a backend with max_local_workspaces;
       // a failure here must not hide the list.
-      const account = await api.accountMe(currentToken).catch(() => null);
+      const account = await Promise.race([
+        api.accountMe(currentToken).catch(() => null),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), ACCOUNT_TIMEOUT_MS)),
+      ]);
       return { ok: true, data: { workspaces, account } };
     } catch (err) {
       return apiFailure(err, "list_failed");
