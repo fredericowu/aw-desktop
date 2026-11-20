@@ -85,7 +85,7 @@ describe("pre-flight guard", () => {
     expect(decidePreflight(host({ linked: true, unknown: true })).action).toBe("block");
   });
   it("resuming the SAME workspace proceeds without minting a token", () => {
-    expect(decidePreflight(host({ linked: true, workspaceSlug: "w" }), "w")).toEqual({ action: "proceed", needsToken: false });
+    expect(decidePreflight(host({ linked: true, workspaceSlug: "w", remoteHostId: "rh_1" }), "w", "rh_1")).toEqual({ action: "proceed", needsToken: false });
   });
   it("resuming a different slug on a linked Mac is blocked", () => {
     expect(decidePreflight(host({ linked: true, workspaceSlug: "other" }), "w").action).toBe("block");
@@ -101,6 +101,13 @@ describe("partial registration (credential saved, slug write failed)", () => {
     expect(decidePreflight(h, "w", "rh_2").action).toBe("block");
     expect(decidePreflight(h, "w", null).action).toBe("block");
     expect(decidePreflight(h, "w").action).toBe("block");
+  });
+  it("same slug but the row's host id differs/is missing (other control plane) => blocked", () => {
+    const same = host({ linked: true, workspaceSlug: "w", remoteHostId: "rh_1" });
+    expect(decidePreflight(same, "w", "rh_other").action).toBe("block");
+    expect(decidePreflight(same, "w", null).action).toBe("block");
+    expect(decidePreflight(same, "w").action).toBe("block");
+    expect(decidePreflight(host({ linked: true, workspaceSlug: "w" }), "w", "rh_1").action).toBe("block");
   });
   it("a host that reports a DIFFERENT workspace is never matched by host id", () => {
     expect(decidePreflight(host({ linked: true, remoteHostId: "rh_1", workspaceSlug: "x" }), "w", "rh_1").action).toBe("block");
@@ -125,7 +132,7 @@ describe("resume state machine (rowState)", () => {
     expect(rowState(row({}), null)).toBe("finish");
   });
   it("pending and linked to itself (quit mid-bootstrap) => finish", () => {
-    expect(rowState(row({}), host({ linked: true, workspaceSlug: "w" }))).toBe("finish");
+    expect(rowState(row({ remote_host_id: "rh_1" }), host({ linked: true, workspaceSlug: "w", remoteHostId: "rh_1" }))).toBe("finish");
   });
   it("pending while this Mac hosts another workspace => blocked", () => {
     expect(rowState(row({}), host({ linked: true, workspaceSlug: "x" }))).toBe("blocked");

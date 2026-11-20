@@ -17,12 +17,11 @@ export function decidePreflight(host: LocalHostStatus, slug?: string, rowHostId?
         "This Mac already has aw-remote-host state that we could not read, so we can't tell whether it hosts a workspace. Nothing was created. Run `aw-remote-host status` in a terminal, or remove the old link first.",
     };
   }
-  if (slug && host.workspaceSlug === slug) return { action: "proceed", needsToken: false };
-  // Partial registration: the CLI saved the credential but its slug write
-  // failed, so status reports a linked host with no workspace. If the row on
-  // the control plane is bound to THIS host id, it is our own half-finished
-  // setup and must stay resumable (no token: the credential already exists).
-  if (slug && !host.workspaceSlug && host.remoteHostId && rowHostId && rowHostId === host.remoteHostId) {
+  // Resuming a linked Mac (slug matches, or the slug write failed so none is
+  // reported) is only safe when the row on the CONFIGURED control plane is bound
+  // to this very host id: a credential saved against another control plane
+  // would otherwise be replayed to this one. No token: the credential exists.
+  if (slug && (!host.workspaceSlug || host.workspaceSlug === slug) && host.remoteHostId && rowHostId && rowHostId === host.remoteHostId) {
     return { action: "proceed", needsToken: false };
   }
   const which = host.workspaceSlug ? ` ("${host.workspaceSlug}")` : "";

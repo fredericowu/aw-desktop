@@ -76,7 +76,7 @@ export async function preflightFor(
   getRowHostId?: (slug: string) => Promise<string | null>,
 ) {
   let rowHostId: string | null = null;
-  if (slug && getRowHostId && host.linked && !host.unknown && !host.workspaceSlug && host.remoteHostId) {
+  if (slug && getRowHostId && host.linked && !host.unknown && host.remoteHostId) {
     rowHostId = await getRowHostId(slug).catch(() => null);
   }
   return decidePreflight(host, slug, rowHostId);
@@ -107,6 +107,8 @@ export async function runBootstrapFlow(slug: string, deps: FlowDeps): Promise<Bo
       token = await deps.mintToken(slug);
     }
 
+    // Signed out while installing/minting: never launch the CLI for a dead session.
+    if (deps.signal?.aborted) throw new Error("cancelled");
     push(advance(p, "link"));
     const code = await runBounded(deps, binary, token, line);
     token = null;
@@ -139,11 +141,20 @@ async function runBounded(
 ): Promise<number | null> {
   const ms = deps.bootstrapTimeoutMs ?? BOOTSTRAP_TIMEOUT_MS;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<"timeout">((resolve) => {
+  let onAbort: (() => void) | undefined;
+  const timeout = new Promise<"timeout" | "cancelled">((resolve) => {
     timer = setTimeout(() => resolve("timeout"), ms);
+    // Sign-out mid-bootstrap: stop the child instead of letting it link this Mac for a dead session.
+    onAbort = () => resolve("cancelled");
+    if (deps.signal?.aborted) onAbort();
+    else deps.signal?.addEventListener("abort", onAbort);
   });
   try {
     const r = await Promise.race([deps.ops.runBootstrap(binary, token, deps.controlPlane, onLine), timeout]);
+    if (r === "cancelled") {
+      await deps.ops.killBootstrap();
+      throw new Error("cancelled");
+    }
     if (r === "timeout") {
       // Retry must not start while the old installer tree could still write Podman files.
       await deps.ops.killBootstrap();
@@ -152,6 +163,7 @@ async function runBounded(
     return r;
   } finally {
     clearTimeout(timer);
+    if (onAbort) deps.signal?.removeEventListener("abort", onAbort);
   }
 }
 

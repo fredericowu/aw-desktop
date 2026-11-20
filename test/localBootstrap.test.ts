@@ -78,7 +78,7 @@ describe("runBootstrapFlow", () => {
 
   it("resume of the same linked workspace reuses the credential: no token minted", async () => {
     const o = ops({ runStatus: async () => "linked: yes (remote_host_id=r)\nworkspace: w" });
-    const { d } = deps(o);
+    const { d } = deps(o, { getRowHostId: async () => "r" });
     const p = await runBootstrapFlow("w", d);
     expect(p.phase).toBe("done");
     expect(d.mintToken).not.toHaveBeenCalled();
@@ -251,6 +251,50 @@ describe("round 5 regressions", () => {
     release();
     await pending;
     expect(currentAfterAwait).toBe(false);
+  });
+});
+
+describe("round 6 regressions", () => {
+  it("same slug on a Mac linked to ANOTHER control plane (row host id differs) never launches the CLI", async () => {
+    const o = ops({ runStatus: async () => "linked: yes (remote_host_id=rh_A)\nworkspace: w" });
+    const { d } = deps(o, { getRowHostId: async () => "rh_B" });
+    const p = await runBootstrapFlow("w", d);
+    expect(p.phase).toBe("failed");
+    expect(o.runBootstrap).not.toHaveBeenCalled();
+  });
+
+  it("session ended while the token mint is pending: the CLI is never launched", async () => {
+    const ac = new AbortController();
+    const o = ops();
+    const { d } = deps(o, {
+      signal: ac.signal,
+      mintToken: async () => {
+        ac.abort(); // sign-out while the request is in flight
+        return "awbs_late";
+      },
+    });
+    const p = await runBootstrapFlow("w", d);
+    expect(p.phase).toBe("failed");
+    expect(p.error).toBe("cancelled");
+    expect(o.runBootstrap).not.toHaveBeenCalled();
+  });
+
+  it("session ended while the child runs: the child tree is killed (awaited) before the slot is freed", async () => {
+    const ac = new AbortController();
+    let gone = false;
+    const o = ops({
+      runBootstrap: () => new Promise<number | null>(() => undefined),
+      killBootstrap: async () => {
+        await new Promise((r) => setTimeout(r, 20));
+        gone = true;
+      },
+    });
+    const { d } = deps(o, { signal: ac.signal });
+    const run = runBootstrapFlow("w", d);
+    setTimeout(() => ac.abort(), 10);
+    const p = await run;
+    expect(p.error).toBe("cancelled");
+    expect(gone).toBe(true);
   });
 });
 
