@@ -134,6 +134,10 @@ export async function runBootstrapFlow(slug: string, deps: FlowDeps): Promise<Bo
         if (host.provisioned !== true) {
           throw new Error(`The control plane reports this workspace as "${seen}" and this Mac has no completed workspace install, so setup can't be resumed from here.`);
         }
+        // The CLI runs infra setup outside the host's lifecycle lock: never overlap a live install.
+        if (deps.ops.installerInFlight()) {
+          throw new Error(`The control plane reports this workspace as "${seen}" while this Mac's background service is still running an install. Wait for it to finish, then Retry.`);
+        }
       } else {
         monitorOnly = (last !== null && deps.now() - last < settleMs) || deps.ops.installerInFlight();
       }

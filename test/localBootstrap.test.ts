@@ -359,6 +359,17 @@ describe("round 7 regressions", () => {
     expect(p.phase).toBe("done");
   });
 
+  it("error/stopped row on a provisioned Mac with a LIVE installer lock never relaunches", async () => {
+    for (const st of ["error", "stopped"]) {
+      const o = ops({ runStatus: async () => "linked: yes (remote_host_id=r)\nworkspace: w\npodman: healthy", installerInFlight: () => true });
+      const { d } = deps(o, { getRowHostId: async () => "r", handoff: handoff(null).h, getStatus: async () => st });
+      const p = await runBootstrapFlow("w", d);
+      expect(p.phase).toBe("failed");
+      expect(p.error).toContain("still running an install");
+      expect(o.runBootstrap).not.toHaveBeenCalled();
+    }
+  });
+
   it("an unreadable resume row never relaunches", async () => {
     const o = linked();
     const { d } = deps(o, { getRowHostId: async () => "r", handoff: handoff(null).h, getStatus: async () => { throw new Error("net"); } });
