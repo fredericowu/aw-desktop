@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { openIfCurrent, scopedExclusive, SessionScope, SetupSlot, bootstrapArgs, childEnv, fetchBytes, exclusive, readHostStatus, runBootstrapFlow, type FlowDeps, type HostOps } from "../src/main/localBootstrap";
+import { openIfCurrent, scopedExclusive, SessionScope, SetupSlot, bootstrapArgs, childEnv, fetchBytes, exclusive, lockFileInFlight, readHostStatus, runBootstrapFlow, type FlowDeps, type HostOps } from "../src/main/localBootstrap";
 import type { BootstrapProgress } from "../src/shared/types";
 
 function ops(over: Partial<HostOps> = {}): HostOps {
@@ -519,5 +519,24 @@ describe("fetchBytes", () => {
     const p = fetchBytes("https://x/y.tgz", stall as unknown as typeof fetch, 1000).catch((e) => e);
     await vi.advanceTimersByTimeAsync(1001);
     expect(await p).toMatchObject({ message: expect.stringContaining("timed out") });
+  });
+});
+
+describe("lockFileInFlight", () => {
+  const err = (code: string) => Object.assign(new Error(code), { code });
+  const dead = () => false;
+  const free = () => "free" as const;
+  it("treats an unreadable lock (EACCES) as in flight", () => {
+    expect(lockFileInFlight("/l", () => { throw err("EACCES"); }, 0, dead, free)).toBe(true);
+  });
+  it("treats any non-ENOENT read failure as in flight", () => {
+    expect(lockFileInFlight("/l", () => { throw err("EIO"); }, 0, dead, free)).toBe(true);
+  });
+  it("a missing lock file means no installer", () => {
+    expect(lockFileInFlight("/l", () => { throw err("ENOENT"); }, 0, dead, free)).toBe(false);
+  });
+  it("readable blank lock defers to the kernel probe", () => {
+    expect(lockFileInFlight("/l", () => ({ content: "", mtimeMs: 0 }), 0, dead, free)).toBe(false);
+    expect(lockFileInFlight("/l", () => ({ content: "", mtimeMs: 0 }), 0, dead, () => "held")).toBe(true);
   });
 });
