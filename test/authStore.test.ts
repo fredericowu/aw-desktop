@@ -1,4 +1,4 @@
-import { mkdtempSync, existsSync, statSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, existsSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -32,20 +32,63 @@ describe("AuthStore", () => {
     expect(store.load()).toBe("jwt");
   });
 
-  it("throwing safeStorage: save falls back to a 0600 file, calls it once, persists the flag", () => {
+  it("throwing safeStorage: called once, in-memory only, no plaintext, flag persisted, one log line", () => {
     const { s, fn } = throwing();
-    const { dir, store } = mk(s);
+    const dir = mkdtempSync(join(tmpdir(), "awauth-"));
+    const log = vi.fn();
+    const store = new AuthStore(() => dir, () => s, log);
     store.save("jwt");
     expect(fn).toHaveBeenCalledTimes(1);
     store.save("jwt2");
     expect(store.load()).toBe("jwt2");
     expect(fn).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledTimes(1);
     expect(existsSync(join(dir, "safestorage-disabled"))).toBe(true);
-    expect(statSync(join(dir, "session.json")).mode & 0o777).toBe(0o600);
-    // a new process (fresh instance) never calls it either
+    expect(existsSync(join(dir, "session.json"))).toBe(false);
+    // a new process (fresh instance) never calls it and is signed out
     const { s: s2, fn: fn2 } = throwing();
-    expect(new AuthStore(() => dir, () => s2).load()).toBe("jwt2");
+    expect(new AuthStore(() => dir, () => s2, log).load()).toBeNull();
     expect(fn2).not.toHaveBeenCalled();
+  });
+
+  it("availability is probed once across many ops when the keychain works", () => {
+    const probe = vi.fn(() => true);
+    const { store } = mk({ ...good(), isEncryptionAvailable: probe });
+    store.save("a");
+    store.save("b");
+    store.clear();
+    store.save("c");
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  it("concurrent callers hit safeStorage exactly once", async () => {
+    const probe = vi.fn(() => { throw new Error("Keychain Not Found"); });
+    const { store } = mk({ ...good(), isEncryptionAvailable: probe });
+    await Promise.all([
+      Promise.resolve().then(() => store.save("a")),
+      Promise.resolve().then(() => store.save("b")),
+      Promise.resolve().then(() => store.load()),
+      Promise.resolve().then(() => store.save("c")),
+    ]);
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  it("failure then no retry in the same session", () => {
+    const { s, fn } = throwing();
+    const { dir, store } = mk(s);
+    writeFileSync(join(dir, "session.bin"), "x");
+    expect(store.load()).toBeNull();
+    store.save("jwt");
+    expect(store.load()).toBe("jwt"); // in-memory only
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it("legacy plaintext session.json is not trusted and is removed", () => {
+    const { s } = throwing();
+    const { dir, store } = mk(s);
+    writeFileSync(join(dir, "session.json"), "old");
+    expect(store.load()).toBeNull();
+    expect(existsSync(join(dir, "session.json"))).toBe(false);
   });
 
   it("hanging safeStorage (attempt marker left behind) is skipped on next launch", () => {
@@ -64,9 +107,10 @@ describe("AuthStore", () => {
   it("clear removes both files", () => {
     const { s } = throwing();
     const { dir, store } = mk(s);
+    writeFileSync(join(dir, "session.bin"), "x");
     store.save("jwt");
     store.clear();
-    expect(existsSync(join(dir, "session.json"))).toBe(false);
+    expect(existsSync(join(dir, "session.bin"))).toBe(false);
     expect(store.load()).toBeNull();
   });
 });

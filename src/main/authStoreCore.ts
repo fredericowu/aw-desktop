@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /** The slice of Electron safeStorage we use (injectable for tests). */
@@ -11,22 +11,30 @@ export interface SafeStorageLike {
 /** Raw aw_id_jwt storage.
  *
  * safeStorage on macOS touches the login keychain; with no default keychain the
- * OS raises a modal "Keychain Not Found" on EVERY call. So:
+ * OS raises a modal "Keychain Not Found" / "enter password" dialog on EVERY
+ * call. So the Keychain is touched at most once per app run:
  *  - safeStorage is only touched when there is something to read or write
  *    (never unconditionally at launch);
- *  - an "attempt" marker is persisted BEFORE the first call and removed after
- *    it returns, so a call that blocks or kills the process is treated as a
- *    failure on the next launch (safeStorage is a synchronous native call and
- *    cannot be timed out in-process);
- *  - any failure/cancel persists a "disabled" flag: safeStorage is never
- *    called again, this run or any future one;
- *  - the token then lives in a 0600 file in userData. */
+ *  - availability is probed once and memoized; later ops reuse the result;
+ *  - all calls are synchronous (JS is single-threaded), so concurrent callers
+ *    are serialized and share that one probe;
+ *  - any failure latches "failed" for the rest of the run (no retry, no
+ *    repeated prompts) and persists a "disabled" flag so future launches skip
+ *    safeStorage too. An "attempt" marker written BEFORE the first call turns
+ *    a hang/kill into a failure on the next launch;
+ *  - on failure the token lives in memory only: the user is signed out on the
+ *    next launch ("sign in again"). Nothing is written in plaintext. */
 export class AuthStore {
   private inMemoryDisabled = false;
+  /** Memoized safeStorage availability probe: undefined = not probed yet. */
+  private available: boolean | undefined;
+  private memToken: string | null = null;
+  private logged = false;
 
   constructor(
     private readonly dir: () => string,
     private readonly storage: () => SafeStorageLike,
+    private readonly log: (msg: string) => void = (m) => console.warn(m),
   ) {}
 
   private p(name: string): string {
@@ -36,7 +44,7 @@ export class AuthStore {
   }
 
   private get encPath() { return this.p("session.bin"); }
-  private get plainPath() { return this.p("session.json"); }
+  private get legacyPlainPath() { return this.p("session.json"); }
   private get flagPath() { return this.p("safestorage-disabled"); }
   private get attemptPath() { return this.p("safestorage-attempt"); }
 
@@ -53,6 +61,10 @@ export class AuthStore {
 
   private disable(): void {
     this.inMemoryDisabled = true;
+    if (!this.logged) {
+      this.logged = true;
+      this.log("auth: Keychain unavailable; session kept in memory only (sign in again next launch)");
+    }
     try { writeFileSync(this.flagPath, String(Date.now()), { mode: 0o600 }); } catch { /* best effort */ }
     try { unlinkSync(this.attemptPath); } catch { /* ignore */ }
   }
@@ -60,17 +72,23 @@ export class AuthStore {
   /** Run one guarded safeStorage operation. Returns null on any failure. */
   private guarded<T>(op: (s: SafeStorageLike) => T): T | null {
     if (this.isDisabled()) return null;
-    try {
-      writeFileSync(this.attemptPath, String(Date.now()), { mode: 0o600 });
-    } catch {
-      this.inMemoryDisabled = true;
-      return null;
+    const first = this.available === undefined;
+    if (first) {
+      try {
+        writeFileSync(this.attemptPath, String(Date.now()), { mode: 0o600 });
+      } catch {
+        this.inMemoryDisabled = true;
+        return null;
+      }
     }
     try {
       const s = this.storage();
-      if (!s.isEncryptionAvailable()) throw new Error("encryption unavailable");
+      if (first) {
+        this.available = s.isEncryptionAvailable();
+        if (!this.available) throw new Error("encryption unavailable");
+      }
       const out = op(s);
-      try { unlinkSync(this.attemptPath); } catch { /* ignore */ }
+      if (first) { try { unlinkSync(this.attemptPath); } catch { /* ignore */ } }
       return out;
     } catch {
       this.disable();
@@ -78,35 +96,30 @@ export class AuthStore {
     }
   }
 
-  private writePlain(token: string): void {
-    const path = this.plainPath;
-    writeFileSync(path, token, { mode: 0o600 });
-    chmodSync(path, 0o600);
-  }
-
   load(): string | null {
-    if (existsSync(this.plainPath)) {
-      try { return readFileSync(this.plainPath, "utf8") || null; } catch { return null; }
-    }
+    if (this.memToken) return this.memToken;
+    // Legacy v0.1.10 plaintext fallback: never read, remove it.
+    try { unlinkSync(this.legacyPlainPath); } catch { /* ignore */ }
     if (!existsSync(this.encPath)) return null;
-    return this.guarded((s) => s.decryptString(readFileSync(this.encPath)));
+    const t = this.guarded((s) => s.decryptString(readFileSync(this.encPath)));
+    if (t) this.memToken = t;
+    return t;
   }
 
   save(token: string): void {
+    this.memToken = token;
     const enc = this.guarded((s) => s.encryptString(token));
     if (enc) {
       writeFileSync(this.encPath, enc);
-      try { unlinkSync(this.plainPath); } catch { /* ignore */ }
       return;
     }
-    this.writePlain(token);
     try { unlinkSync(this.encPath); } catch { /* ignore */ }
   }
 
   clear(): void {
-    for (const f of [this.encPath, this.plainPath]) {
+    this.memToken = null;
+    for (const f of [this.encPath, this.legacyPlainPath]) {
       try { if (existsSync(f)) unlinkSync(f); } catch { /* ignore */ }
     }
   }
 }
-
