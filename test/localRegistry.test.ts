@@ -146,6 +146,33 @@ describe("per-account cap", () => {
     expect(await offline.resolveLimit("A")).toBe(5);
     expect(await offline.resolveLimit("B")).toBe(1);
   });
+  it("keeps another account's refreshed limit when a create is blocked on the port probe", async () => {
+    const s = memStore();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let reached!: () => void;
+    const probing = new Promise<void>((r) => (reached = r));
+    const creator = mk(s, {
+      fetchMaxLocal: async () => 5,
+      isPortFree: async () => (reached(), await gate, true),
+    });
+    const pending = creator.create("A", "pending");
+    await probing;
+    await mk(s, { fetchMaxLocal: async () => 5 }).resolveLimit("B");
+    release();
+    const ws = await pending;
+    const offline = mk(s, { fetchMaxLocal: async () => { throw new Error("offline"); } });
+    expect(await offline.resolveLimit("B")).toBe(5);
+    expect(offline.list().map((w) => w.id)).toEqual([ws.id]);
+  });
+  it("never hands the same ports to two overlapping creates", async () => {
+    const s = memStore();
+    const r = mk(s, { fetchMaxLocal: async () => 5, isPortFree: async () => (await Promise.resolve(), true) });
+    const [a, b] = await Promise.all([r.create("A", "a"), r.create("B", "b")]);
+    const ports = [a.uiPort, a.apiPort, b.uiPort, b.apiPort];
+    expect(new Set(ports).size).toBe(4);
+    expect(r.list()).toHaveLength(2);
+  });
   it("keeps a workspace created while a refresh is in flight", async () => {
     const s = memStore();
     let release!: () => void;

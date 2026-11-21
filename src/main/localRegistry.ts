@@ -148,6 +148,12 @@ function isRecord(w: unknown): w is LocalWorkspace {
   );
 }
 
+function takenPorts(ws: LocalWorkspace[]): Set<number> {
+  const t = new Set<number>();
+  for (const w of ws) (t.add(w.uiPort), t.add(w.apiPort));
+  return t;
+}
+
 export class LocalRegistry {
   private readonly isPortFree: PortProbe;
   private readonly now: () => Date;
@@ -211,27 +217,29 @@ export class LocalRegistry {
   async create(sub: string, name: string): Promise<LocalWorkspace> {
     if (!sub) throw new Error("sub is required to create a local workspace");
     await this.assertCanCreate(sub);
-    const f = this.load();
-    const taken = new Set<number>();
-    for (const w of f.workspaces) {
-      taken.add(w.uiPort);
-      taken.add(w.apiPort);
+    // Ports are probed asynchronously, so re-read the store afterwards and retry if a
+    // concurrent create took them; saving a pre-await snapshot would erase concurrent
+    // writes (e.g. another account's refreshed limit).
+    for (;;) {
+      const snap = this.load();
+      const { uiPort, apiPort } = await allocatePorts(this.isPortFree, takenPorts(snap.workspaces));
+      const f = this.load();
+      if (takenPorts(f.workspaces).has(uiPort) || takenPorts(f.workspaces).has(apiPort)) continue;
+      const ids = new Set(f.workspaces.map((w) => w.id));
+      let id = this.newId();
+      while (ids.has(id)) id = this.newId();
+      const ws: LocalWorkspace = {
+        id,
+        name: name.trim() || id,
+        sub,
+        uiPort,
+        apiPort,
+        createdAt: this.now().toISOString(),
+        cloud: "none",
+      };
+      this.save({ ...f, workspaces: [...f.workspaces, ws] });
+      return ws;
     }
-    const { uiPort, apiPort } = await allocatePorts(this.isPortFree, taken);
-    const ids = new Set(f.workspaces.map((w) => w.id));
-    let id = this.newId();
-    while (ids.has(id)) id = this.newId();
-    const ws: LocalWorkspace = {
-      id,
-      name: name.trim() || id,
-      sub,
-      uiPort,
-      apiPort,
-      createdAt: this.now().toISOString(),
-      cloud: "none",
-    };
-    this.save({ ...f, workspaces: [...f.workspaces, ws] });
-    return ws;
   }
 
   remove(id: string): boolean {
@@ -260,7 +268,8 @@ export class LocalRegistry {
     if (!(await ok(apiPort, [uiPort]))) apiPort = await findFreePort(this.isPortFree, new Set([...others, uiPort]), uiPort + 1);
     const workspace = { ...cur, uiPort, apiPort };
     if (uiPort !== cur.uiPort || apiPort !== cur.apiPort) {
-      this.save({ ...f, workspaces: f.workspaces.map((w) => (w.id === id ? workspace : w)) });
+      const latest = this.load(); // re-read: the probes above awaited
+      this.save({ ...latest, workspaces: latest.workspaces.map((w) => (w.id === id ? workspace : w)) });
     }
     return { workspace, uiChanged: uiPort !== cur.uiPort, apiChanged: apiPort !== cur.apiPort };
   }
