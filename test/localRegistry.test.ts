@@ -138,6 +138,27 @@ describe("per-account cap", () => {
     expect(await offline.resolveLimit("subB")).toBe(1);
     expect(await offline.resolveLimit("subC")).toBe(2);
   });
+  it("keeps both limits when refreshes for two subs overlap", async () => {
+    const s = memStore();
+    const r = mk(s, { fetchMaxLocal: async (sub) => (await Promise.resolve(), sub === "A" ? 5 : 1) });
+    await Promise.all([r.resolveLimit("A"), r.resolveLimit("B")]);
+    const offline = mk(s, { fetchMaxLocal: async () => { throw new Error("offline"); } });
+    expect(await offline.resolveLimit("A")).toBe(5);
+    expect(await offline.resolveLimit("B")).toBe(1);
+  });
+  it("keeps a workspace created while a refresh is in flight", async () => {
+    const s = memStore();
+    let release!: () => void;
+    const gate = new Promise<void>((res) => (release = res));
+    const r = mk(s, { fetchMaxLocal: async () => 3 });
+    await r.create("A", "first");
+    const slow = mk(s, { fetchMaxLocal: async () => (await gate, 4) });
+    const pending = slow.resolveLimit("A");
+    await r.create("A", "second");
+    release();
+    expect(await pending).toBe(4);
+    expect(r.listFor("A")).toHaveLength(2);
+  });
   it("passes the sub to the limit fetch and rejects an empty sub", async () => {
     const seen: string[] = [];
     const r = mk(memStore(), { fetchMaxLocal: async (sub) => (seen.push(sub), 3) });
