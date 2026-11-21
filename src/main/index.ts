@@ -1,5 +1,7 @@
 import { app, ipcMain, powerMonitor, BrowserWindow, Menu } from "electron";
-import { APEX, CONSOLE_BASE, workspaceUrl } from "./config";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { API_BASE, APEX, CONSOLE_BASE, workspaceUrl } from "./config";
 import * as api from "./apiClient";
 import { ApiError } from "./apiClient";
 import { loadToken, saveToken, clearToken } from "./authStore";
@@ -8,7 +10,9 @@ import { registerProtocolHandler, startGoogleSignInHandoff } from "./oauth";
 import { createAuthWindow, createShellWindow } from "./windows";
 import { checkForUpdates } from "./updater";
 import { probeRuntimes } from "./runtimeProbe";
-import type { ApiResult, AuthState, AwUser, WorkspaceInfo, WorkspaceListData } from "../shared/types";
+import { openIfCurrent, SessionScope, type SessionHandle, SetupSlot, scopedExclusive, killActiveBootstrap, preflightFor, readHostStatus, realHostOps, runBootstrapFlow } from "./localBootstrap";
+import { decidePreflight, fail, startProgress } from "./bootstrapCore";
+import type { ApiResult, AuthState, AwUser, BootstrapProgress, WorkspaceInfo, WorkspaceListData } from "../shared/types";
 
 // macOS only (Phase 1, per Architect design) — a second instance just
 // focuses the first rather than opening twice, which also keeps a single
@@ -24,15 +28,29 @@ let authWindow: BrowserWindow | null = null;
 let shellWindow: BrowserWindow | null = null;
 let currentToken: string | null = null;
 
+let bootstrapProgress: BootstrapProgress | null = null;
+const setupSlot = new SetupSlot();
+/** A setup job belongs to the sign-in session that started it. */
+const sessionScope = new SessionScope();
+
 let state: AuthState = { stage: "splash", user: null, error: null, apex: APEX };
+
+/** macOS keeps the app alive after the picker window is closed, leaving
+ * `authWindow` pointing at a destroyed window: every send/hide must go through this. */
+function liveAuthWindow(): BrowserWindow | null {
+  return authWindow && !authWindow.isDestroyed() ? authWindow : null;
+}
 
 function setState(partial: Partial<AuthState>): void {
   state = { ...state, ...partial };
-  authWindow?.webContents.send("aw:state-changed", state);
+  liveAuthWindow()?.webContents.send("aw:state-changed", state);
 }
 
 function teardownToLogin(error: string | null = null): void {
   currentToken = null;
+  // End the initiating session's setup job: no more progress, token use or auto-open.
+  sessionScope.end();
+  bootstrapProgress = null;
   clearToken();
   clearIdentityCookie().catch(() => undefined);
   shellWindow?.close();
@@ -49,13 +67,21 @@ function routeAfterAuth(user: AwUser): void {
   setState({ stage: "picker", user, error: null });
 }
 
-async function openWorkspace(slug: string): Promise<void> {
+async function openWorkspace(slug: string, isCurrent: () => boolean = () => true): Promise<void> {
   if (!currentToken) return teardownToLogin("session_lost");
+  const token = currentToken;
   setState({ stage: "loading-workspace", error: null });
-  await injectIdentityCookie(currentToken);
-  authWindow?.hide();
-  shellWindow = createShellWindow(workspaceUrl(slug));
-  watchForSessionExpiry(shellWindow);
+  await openIfCurrent(
+    isCurrent,
+    () => injectIdentityCookie(token),
+    () => {
+      liveAuthWindow()?.hide();
+      shellWindow = createShellWindow(workspaceUrl(slug));
+      watchForSessionExpiry(shellWindow);
+    },
+    // Signed out while the cookie was being written: don't leave it behind.
+    () => void clearIdentityCookie().catch(() => undefined),
+  );
 }
 
 /** The SPA drops to unauthenticated and navigates to its own console login
@@ -125,6 +151,72 @@ function apiFailure<T>(err: unknown, fallback: string): ApiResult<T> {
     return { ok: false, error: err.message, code: err.code, status: err.status, limit: err.limit };
   }
   return { ok: false, error: err instanceof Error ? err.message : fallback };
+}
+
+function emitBootstrap(p: BootstrapProgress, isCurrent: () => boolean = () => true): void {
+  if (!isCurrent()) return;
+  bootstrapProgress = p;
+  try {
+    liveAuthWindow()?.webContents.send("aw:bootstrap-progress", p);
+  } catch {
+    // The picker window can vanish mid-send; setup must keep running.
+  }
+}
+
+/** When the CLI last detached per slug, persisted so a relaunch does not start a second installer. */
+const handoffStore = {
+  file: () => join(app.getPath("userData"), "bootstrap-handoff.json"),
+  read(): Record<string, number> {
+    try {
+      return JSON.parse(readFileSync(this.file(), "utf8")) as Record<string, number>;
+    } catch {
+      return {};
+    }
+  },
+  lastLaunchedAt(slug: string): number | null {
+    return this.read()[slug] ?? null;
+  },
+  markLaunched(slug: string, at: number): void {
+    try {
+      writeFileSync(this.file(), JSON.stringify({ ...this.read(), [slug]: at }));
+    } catch {
+      // best effort: worst case a Retry re-runs the (idempotent) bootstrap
+    }
+  },
+};
+
+/** Caller must already hold the slot; this releases it. */
+async function startBootstrap(slug: string, scope: SessionHandle): Promise<void> {
+  // The job only ever acts as the session that started it.
+  const live = () => {
+    if (!scope.isCurrent() || !currentToken) throw new Error("session_lost");
+    return currentToken;
+  };
+  try {
+    const result = await runBootstrapFlow(slug, {
+      ops: realHostOps(),
+      // The token only ever lives in this closure's return value: not logged, not persisted.
+      mintToken: async (s) => (await api.mintBootstrapToken(live(), s)).token,
+      getStatus: async (s, signal) => (await api.getWorkspace(live(), s, signal)).status,
+      getRowHostId: async (s) => (await api.getWorkspace(live(), s)).remote_host_id ?? null,
+      controlPlane: API_BASE,
+      emit: (p) => emitBootstrap(p, scope.isCurrent),
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      now: () => Date.now(),
+      signal: scope.signal,
+      handoff: handoffStore,
+    });
+    if (result.phase === "done" && scope.isCurrent()) {
+      await openWorkspace(slug, scope.isCurrent);
+      // A done snapshot must not resurface when the picker is shown again.
+      bootstrapProgress = null;
+    }
+  } catch (err) {
+    emitBootstrap(fail(bootstrapProgress ?? startProgress(slug), err instanceof Error ? err.message : String(err)), scope.isCurrent);
+  } finally {
+    scope.finish();
+    setupSlot.release();
+  }
 }
 
 function registerIpcHandlers(): void {
@@ -204,15 +296,52 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle("aw:checkRuntime", () => probeRuntimes());
 
-  // Creates the REAL BYOD row (placement_driver=remote-host). No bootstrap:
-  // that is Phase 2, so the row stays "provisioning" / setup pending.
+  ipcMain.handle("aw:getLocalHost", () => readHostStatus(realHostOps()));
+  ipcMain.handle("aw:getBootstrapProgress", () => bootstrapProgress);
+
+  // Pre-flight FIRST: a Mac that already hosts a workspace is refused before
+  // a row exists or a token is minted. Then the REAL BYOD row, then the
+  // bootstrap runs in the background (progress over aw:bootstrap-progress).
+  const BUSY = { ok: false, error: "A setup is already running on this Mac.", code: "bootstrap_running" } as const;
+
   ipcMain.handle("aw:createLocalWorkspace", async (_e, name: string): Promise<ApiResult<WorkspaceInfo>> => {
     if (!currentToken) return { ok: false, error: "session_lost" };
-    try {
-      return { ok: true, data: await api.createWorkspace(currentToken, name) };
-    } catch (err) {
-      return apiFailure(err, "create_failed");
-    }
+    const token = currentToken;
+    // Bound to the session at IPC entry, before any await: a response that
+    // lands after sign-out/sign-in must never run as the new user.
+    return scopedExclusive<ApiResult<WorkspaceInfo>>(setupSlot, sessionScope, BUSY, async (scope, handOff) => {
+      try {
+        const pre = decidePreflight(await readHostStatus(realHostOps()));
+        if (pre.action === "block") return { ok: false, error: pre.message, code: "already_linked" };
+        if (!scope.isCurrent()) return { ok: false, error: "session_lost" };
+        const row = await api.createWorkspace(token, name);
+        // The row exists for the original account; only that session may drive it.
+        if (!scope.isCurrent()) return { ok: true, data: row };
+        handOff();
+        void startBootstrap(row.name, scope);
+        return { ok: true, data: row };
+      } catch (err) {
+        return apiFailure(err, "create_failed");
+      }
+    });
+  });
+
+  // Resume/retry for a row that exists but never came up: never creates a row.
+  ipcMain.handle("aw:finishLocalSetup", async (_e, slug: string): Promise<ApiResult<null>> => {
+    if (!currentToken) return { ok: false, error: "session_lost" };
+    return scopedExclusive<ApiResult<null>>(setupSlot, sessionScope, BUSY, async (scope, handOff) => {
+      try {
+        const tk = currentToken as string;
+        const pre = await preflightFor(await readHostStatus(realHostOps()), slug, async (s) => (await api.getWorkspace(tk, s)).remote_host_id ?? null);
+        if (pre.action === "block") return { ok: false, error: pre.message, code: "already_linked" };
+        if (!scope.isCurrent()) return { ok: false, error: "session_lost" };
+        handOff();
+        void startBootstrap(slug, scope);
+        return { ok: true, data: null };
+      } catch (err) {
+        return apiFailure(err, "setup_failed");
+      }
+    });
   });
 
   ipcMain.handle("aw:logout", () => logout());
@@ -285,6 +414,8 @@ app.whenReady().then(async () => {
   void refreshLoop();
   void checkForUpdates();
 });
+
+app.on("before-quit", () => killActiveBootstrap());
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
