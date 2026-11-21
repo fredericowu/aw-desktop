@@ -169,3 +169,22 @@ describe("progress", () => {
     expect(complete(p).phase).toBe("done");
   });
 });
+
+import { lockInFlight, HOST_VERB_BOUND_MS } from "../src/main/bootstrapCore";
+describe("lockInFlight", () => {
+  const now = 10_000_000_000;
+  const rec = (pid: number, ageMs: number) => JSON.stringify({ verb: "bootstrap", pid, started_at: (now - ageMs) / 1000 });
+  it("missing or blank => false", () => {
+    expect(lockInFlight(null, null, now, () => true)).toBe(false);
+    expect(lockInFlight("  \n", 1, now, () => true)).toBe(false);
+  });
+  it("live pid, fresh => true; dead pid => false; too old => false", () => {
+    expect(lockInFlight(rec(7, 1000), now, now, () => true)).toBe(true);
+    expect(lockInFlight(rec(7, 1000), now, now, () => false)).toBe(false);
+    expect(lockInFlight(rec(7, HOST_VERB_BOUND_MS + 1), now, now, () => true)).toBe(false);
+  });
+  it("unparseable fails safe on mtime", () => {
+    expect(lockInFlight("verb=bootstrap", now - 1000, now, () => false)).toBe(true);
+    expect(lockInFlight("verb=bootstrap", now - HOST_VERB_BOUND_MS - 1, now, () => false)).toBe(false);
+  });
+});

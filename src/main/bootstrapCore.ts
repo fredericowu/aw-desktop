@@ -60,3 +60,33 @@ export function parseStatus(output: string): Omit<LocalHostStatus, "binary"> {
 }
 
 export * from "../shared/bootstrapState";
+
+/** The host's own bound for one lifecycle verb (aw-remote-host ops_remove_workspace.go). */
+export const HOST_VERB_BOUND_MS = 45 * 60 * 1000;
+
+/** Is a background install holding the host's lifecycle lock?
+ * `content` is ~/.aw-remote-host/workspace-lifecycle.lock ({verb,pid,started_at}
+ * as JSON, epoch seconds), blanked on release. In flight when the pid is alive
+ * and started_at is under the host's verb bound. Non-empty but unparseable
+ * counts as in flight while the file mtime is under the bound (fail safe).
+ * Reads a private aw-remote-host file: re-check on any AW_REMOTE_HOST_VERSION bump. */
+export function lockInFlight(
+  content: string | null,
+  mtimeMs: number | null,
+  nowMs: number,
+  pidAlive: (pid: number) => boolean,
+): boolean {
+  if (content === null || content.trim() === "") return false;
+  let parsed: { pid?: unknown; started_at?: unknown } | null = null;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    parsed = null;
+  }
+  const pid = parsed && typeof parsed.pid === "number" ? parsed.pid : null;
+  const startedAt = parsed && typeof parsed.started_at === "number" ? parsed.started_at : null;
+  if (pid === null || startedAt === null) {
+    return mtimeMs !== null && nowMs - mtimeMs < HOST_VERB_BOUND_MS;
+  }
+  return pidAlive(pid) && nowMs - startedAt * 1000 < HOST_VERB_BOUND_MS;
+}
