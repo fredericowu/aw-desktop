@@ -116,7 +116,8 @@ export async function runBootstrapFlow(slug: string, deps: FlowDeps): Promise<Bo
     // relaunch: on reconnect aw-backend only provisions rows still "provisioning" and
     // marks any other row running without starting its container, so a relaunch would
     // open a workspace that never came up. Fail clearly instead.
-    if (monitorOnly) {
+    // Applies to ANY linked-host resume (inside or after the hand-off window).
+    if (!pre.needsToken) {
       const seen = await pollOnce(deps, slug, 30_000);
       if (DEAD_STATUSES.has(seen)) {
         throw new Error(`The control plane reports this workspace as "${seen}". Setup can't be resumed from here (a reconnect would mark it running without provisioning it). Delete the workspace and create it again.`);

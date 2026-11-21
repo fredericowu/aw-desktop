@@ -338,6 +338,17 @@ describe("round 7 regressions", () => {
     }
   });
 
+  it("after the hand-off window an error/stopped row is still refused, never relaunched", async () => {
+    for (const st of ["error", "stopped"]) {
+      const o = linked();
+      const { h } = handoff(1_000);
+      const { d } = deps(o, { getRowHostId: async () => "r", handoff: h, now: () => 1_000 + 46 * 60 * 1000, getStatus: async () => st });
+      const p = await runBootstrapFlow("w", d);
+      expect(p.phase).toBe("failed");
+      expect(o.runBootstrap).not.toHaveBeenCalled();
+    }
+  });
+
   it("a timed-out wait keeps the hand-off marker (no evidence the installer stopped)", async () => {
     const o = linked();
     const clear = vi.fn();
