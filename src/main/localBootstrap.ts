@@ -61,7 +61,14 @@ export interface FlowDeps {
   /** Bound on the bootstrap child itself (it downloads Podman with no deadline of its own). */
   bootstrapTimeoutMs?: number;
   signal?: AbortSignal;
+  /** Records when the CLI last detached for a slug. The control plane then keeps
+   * provisioning inside the LaunchAgent, so a second CLI run within the grace
+   * window would race it (same container name). */
+  handoff?: { lastLaunchedAt(slug: string): number | null; markLaunched(slug: string, at: number): void };
+  handoffGraceMs?: number;
 }
+
+export const HANDOFF_GRACE_MS = 45 * 60 * 1000;
 
 const POLL_INTERVAL_MS = 5000;
 const POLL_TIMEOUT_MS = 20 * 60 * 1000;
@@ -98,8 +105,14 @@ export async function runBootstrapFlow(slug: string, deps: FlowDeps): Promise<Bo
     const pre = await preflightFor(host, slug, deps.getRowHostId);
     if (pre.action === "block") throw new Error(pre.message);
 
+    // Retry/Finish while a previous run's LaunchAgent may still be provisioning:
+    // keep monitoring instead of launching a second installer.
+    const last = deps.handoff?.lastLaunchedAt(slug) ?? null;
+    const monitorOnly = !pre.needsToken && last !== null && deps.now() - last < (deps.handoffGraceMs ?? HANDOFF_GRACE_MS);
+    if (monitorOnly) line("Setup was already handed to this Mac's background service; waiting for it to finish instead of starting another install.");
+
     let binary = host.binary ? deps.ops.findBinary() : null;
-    if (!binary) binary = await deps.ops.installBinary(line);
+    if (!binary && !monitorOnly) binary = await deps.ops.installBinary(line);
 
     let token: string | null = null;
     if (pre.needsToken) {
@@ -109,10 +122,13 @@ export async function runBootstrapFlow(slug: string, deps: FlowDeps): Promise<Bo
 
     // Signed out while installing/minting: never launch the CLI for a dead session.
     if (deps.signal?.aborted) throw new Error("cancelled");
-    push(advance(p, "link"));
-    const code = await runBounded(deps, binary, token, line);
-    token = null;
-    if (code !== 0) throw new Error(`aw-remote-host bootstrap-workspace exited with ${code === null ? "an error" : `code ${code}`}`);
+    if (!monitorOnly) {
+      push(advance(p, "link"));
+      const code = await runBounded(deps, binary as string, token, line);
+      token = null;
+      if (code !== 0) throw new Error(`aw-remote-host bootstrap-workspace exited with ${code === null ? "an error" : `code ${code}`}`);
+      deps.handoff?.markLaunched(slug, deps.now());
+    }
 
     push(advance(p, "running"));
     const interval = deps.pollIntervalMs ?? POLL_INTERVAL_MS;
@@ -248,6 +264,20 @@ export function scopedExclusive<T>(
       if (!started) session.finish();
     }
   });
+}
+
+/** Runs `open` only if the session that asked for it is still current, checked
+ * AGAIN after the async prepare step (cookie write): sign-out can land in that
+ * window. When it did, `undo` removes what prepare wrote. */
+export async function openIfCurrent(isCurrent: () => boolean, prepare: () => Promise<void>, open: () => void, undo: () => void): Promise<boolean> {
+  if (!isCurrent()) return false;
+  await prepare();
+  if (!isCurrent()) {
+    undo();
+    return false;
+  }
+  open();
+  return true;
 }
 
 /** One status poll bounded by the remaining budget: a request that stalls

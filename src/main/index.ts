@@ -1,4 +1,6 @@
 import { app, ipcMain, powerMonitor, BrowserWindow, Menu } from "electron";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { API_BASE, APEX, CONSOLE_BASE, workspaceUrl } from "./config";
 import * as api from "./apiClient";
 import { ApiError } from "./apiClient";
@@ -8,7 +10,7 @@ import { registerProtocolHandler, startGoogleSignInHandoff } from "./oauth";
 import { createAuthWindow, createShellWindow } from "./windows";
 import { checkForUpdates } from "./updater";
 import { probeRuntimes } from "./runtimeProbe";
-import { SessionScope, type SessionHandle, SetupSlot, scopedExclusive, killActiveBootstrap, preflightFor, readHostStatus, realHostOps, runBootstrapFlow } from "./localBootstrap";
+import { openIfCurrent, SessionScope, type SessionHandle, SetupSlot, scopedExclusive, killActiveBootstrap, preflightFor, readHostStatus, realHostOps, runBootstrapFlow } from "./localBootstrap";
 import { decidePreflight, fail, startProgress } from "./bootstrapCore";
 import type { ApiResult, AuthState, AwUser, BootstrapProgress, WorkspaceInfo, WorkspaceListData } from "../shared/types";
 
@@ -65,13 +67,21 @@ function routeAfterAuth(user: AwUser): void {
   setState({ stage: "picker", user, error: null });
 }
 
-async function openWorkspace(slug: string): Promise<void> {
+async function openWorkspace(slug: string, isCurrent: () => boolean = () => true): Promise<void> {
   if (!currentToken) return teardownToLogin("session_lost");
+  const token = currentToken;
   setState({ stage: "loading-workspace", error: null });
-  await injectIdentityCookie(currentToken);
-  liveAuthWindow()?.hide();
-  shellWindow = createShellWindow(workspaceUrl(slug));
-  watchForSessionExpiry(shellWindow);
+  await openIfCurrent(
+    isCurrent,
+    () => injectIdentityCookie(token),
+    () => {
+      liveAuthWindow()?.hide();
+      shellWindow = createShellWindow(workspaceUrl(slug));
+      watchForSessionExpiry(shellWindow);
+    },
+    // Signed out while the cookie was being written: don't leave it behind.
+    () => void clearIdentityCookie().catch(() => undefined),
+  );
 }
 
 /** The SPA drops to unauthenticated and navigates to its own console login
@@ -153,6 +163,28 @@ function emitBootstrap(p: BootstrapProgress, isCurrent: () => boolean = () => tr
   }
 }
 
+/** When the CLI last detached per slug, persisted so a relaunch does not start a second installer. */
+const handoffStore = {
+  file: () => join(app.getPath("userData"), "bootstrap-handoff.json"),
+  read(): Record<string, number> {
+    try {
+      return JSON.parse(readFileSync(this.file(), "utf8")) as Record<string, number>;
+    } catch {
+      return {};
+    }
+  },
+  lastLaunchedAt(slug: string): number | null {
+    return this.read()[slug] ?? null;
+  },
+  markLaunched(slug: string, at: number): void {
+    try {
+      writeFileSync(this.file(), JSON.stringify({ ...this.read(), [slug]: at }));
+    } catch {
+      // best effort: worst case a Retry re-runs the (idempotent) bootstrap
+    }
+  },
+};
+
 /** Caller must already hold the slot; this releases it. */
 async function startBootstrap(slug: string, scope: SessionHandle): Promise<void> {
   // The job only ever acts as the session that started it.
@@ -172,9 +204,10 @@ async function startBootstrap(slug: string, scope: SessionHandle): Promise<void>
       sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
       now: () => Date.now(),
       signal: scope.signal,
+      handoff: handoffStore,
     });
     if (result.phase === "done" && scope.isCurrent()) {
-      await openWorkspace(slug);
+      await openWorkspace(slug, scope.isCurrent);
       // A done snapshot must not resurface when the picker is shown again.
       bootstrapProgress = null;
     }

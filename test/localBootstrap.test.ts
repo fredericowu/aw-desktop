@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { scopedExclusive, SessionScope, SetupSlot, bootstrapArgs, childEnv, fetchBytes, exclusive, readHostStatus, runBootstrapFlow, type FlowDeps, type HostOps } from "../src/main/localBootstrap";
+import { openIfCurrent, scopedExclusive, SessionScope, SetupSlot, bootstrapArgs, childEnv, fetchBytes, exclusive, readHostStatus, runBootstrapFlow, type FlowDeps, type HostOps } from "../src/main/localBootstrap";
 import type { BootstrapProgress } from "../src/shared/types";
 
 function ops(over: Partial<HostOps> = {}): HostOps {
@@ -295,6 +295,66 @@ describe("round 6 regressions", () => {
     const p = await run;
     expect(p.error).toBe("cancelled");
     expect(gone).toBe(true);
+  });
+});
+
+describe("round 7 regressions", () => {
+  const linked = () => ops({ runStatus: async () => "linked: yes (remote_host_id=r)\nworkspace: w" });
+  const handoff = (at: number | null) => {
+    const marks: number[] = [];
+    return { marks, h: { lastLaunchedAt: () => at, markLaunched: (_s: string, t: number) => void marks.push(t) } };
+  };
+
+  it("Retry within the grace window monitors the LaunchAgent instead of launching a second installer", async () => {
+    const o = linked();
+    const { h } = handoff(1_000);
+    const { d } = deps(o, { getRowHostId: async () => "r", handoff: h, now: () => 2_000 });
+    const p = await runBootstrapFlow("w", d);
+    expect(p.phase).toBe("done");
+    expect(o.runBootstrap).not.toHaveBeenCalled();
+    expect(o.installBinary).not.toHaveBeenCalled();
+    expect(p.lines.join("\n")).toContain("waiting for it to finish");
+  });
+
+  it("after the grace window a Retry re-runs the bootstrap (agent may be dead) and records the launch", async () => {
+    const o = linked();
+    const { h, marks } = handoff(1_000);
+    const { d } = deps(o, { getRowHostId: async () => "r", handoff: h, now: () => 1_000 + 46 * 60 * 1000 });
+    const p = await runBootstrapFlow("w", d);
+    expect(p.phase).toBe("done");
+    expect(o.runBootstrap).toHaveBeenCalledTimes(1);
+    expect(marks.length).toBe(1);
+  });
+
+  it("a first run records the hand-off only after the CLI exited 0", async () => {
+    const { h, marks } = handoff(null);
+    const failing = ops({ runBootstrap: async () => 1 });
+    await runBootstrapFlow("w", deps(failing, { handoff: h }).d);
+    expect(marks.length).toBe(0);
+    await runBootstrapFlow("w", deps(ops(), { handoff: h }).d);
+    expect(marks.length).toBe(1);
+  });
+
+  it("openIfCurrent: sign-out during the cookie write never opens the shell and undoes the cookie", async () => {
+    let current = true;
+    const log: string[] = [];
+    const ok = await openIfCurrent(
+      () => current,
+      async () => {
+        log.push("cookie");
+        current = false; // teardown lands while the cookie is being written
+      },
+      () => log.push("open"),
+      () => log.push("undo"),
+    );
+    expect(ok).toBe(false);
+    expect(log).toEqual(["cookie", "undo"]);
+  });
+
+  it("openIfCurrent opens when the session survives", async () => {
+    const log: string[] = [];
+    expect(await openIfCurrent(() => true, async () => void log.push("c"), () => log.push("open"), () => log.push("undo"))).toBe(true);
+    expect(log).toEqual(["c", "open"]);
   });
 });
 
