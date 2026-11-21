@@ -3,14 +3,14 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Picker } from "../src/renderer/screens/Picker";
 import type { DepId, DepsSnapshot, DepStatus } from "../src/shared/deps";
-import type { ApiResult, AuthState, AwBridge, BootstrapProgress, LocalHostStatus, RuntimeCheck, WorkspaceInfo, WorkspaceListData } from "../src/shared/types";
+import type { ApiResult, AuthState, AwBridge, BootstrapProgress, RuntimeCheck, WorkspaceInfo, WorkspaceListData } from "../src/shared/types";
 
 const state: AuthState = { stage: "picker", user: null, error: null, apex: "aw.tekflox.com" };
 const ws = (over: Partial<WorkspaceInfo>): WorkspaceInfo => ({
   name: "w",
-  placement_driver: "remote-host",
+  placement_driver: "desktop-local",
   is_hosted: false,
-  status: "provisioning",
+  status: "stopped",
   ...over,
 });
 let emitProgress: (p: BootstrapProgress) => void = () => undefined;
@@ -20,10 +20,10 @@ const item = (id: DepId, state: DepStatus["state"], extra: Partial<DepStatus> = 
   plan: state === "installed" ? undefined : { source: "https://x/" + id, size: "1.0 MB", checksum: "sha256 abc", dest: "~/x", needsAdmin: false },
   ...extra,
 });
-const snapOf = (host: DepStatus["state"], podman: DepStatus["state"], extra: Partial<DepsSnapshot> = {}): DepsSnapshot => ({
+const snapOf = (_unused: DepStatus["state"], podman: DepStatus["state"], extra: Partial<DepsSnapshot> = {}): DepsSnapshot => ({
   platform: "darwin", supported: true,
-  items: [item("host", host), item("podman", podman), item("machine", "missing", { plan: undefined })],
-  ready: host === "installed" && podman === "installed", ...extra,
+  items: [item("podman", podman), item("machine", "missing", { plan: undefined })],
+  ready: podman === "installed", ...extra,
 });
 const allReady = snapOf("installed", "installed");
 const found: RuntimeCheck = { runtimes: [{ kind: "podman", installed: true, running: true }], ready: true };
@@ -46,7 +46,6 @@ function bridge(over: Partial<AwBridge> & { workspaces?: WorkspaceInfo[]; localC
     onDepsChanged: vi.fn(() => () => undefined),
     createLocalWorkspace: vi.fn(async (name: string): Promise<ApiResult<WorkspaceInfo>> => ({ ok: true, data: ws({ name }) })),
     pickWorkspace: vi.fn(async () => ({ ok: true })),
-    getLocalHost: vi.fn(async (): Promise<LocalHostStatus> => ({ binary: false, linked: false })),
     finishLocalSetup: vi.fn(async () => ({ ok: true, data: null })),
     getBootstrapProgress: vi.fn(async (): Promise<BootstrapProgress | null> => null),
     onBootstrapProgress: vi.fn((cb: (p: BootstrapProgress) => void) => {
@@ -86,51 +85,32 @@ describe("Picker landing", () => {
   });
 
   it("a hosted membership shows under Cloud and opens normally", async () => {
-    const b = bridge({ workspaces: [ws({ name: "acme", placement_driver: "remote-host", is_hosted: true, status: "running" })] });
+    const b = bridge({ workspaces: [ws({ name: "acme", placement_driver: "hosted", is_hosted: true, status: "running" })] });
     render(<Picker state={state} />);
     const cloud = await screen.findByTestId("cloud-block");
     fireEvent.click(cloud.querySelector(".workspace-list button")!);
     expect(b.pickWorkspace).toHaveBeenCalledWith("acme");
   });
 
-  it("a created-but-unbootstrapped local row is 'Setup pending on this Mac' and not openable", async () => {
-    const b = bridge({ workspaces: [ws({ name: "mine" })] });
+  it("a stopped local row is not openable directly and offers Start, which resumes by id and never creates", async () => {
+    const b = bridge({ workspaces: [ws({ name: "local1a2b", display_name: "My box" })] });
     render(<Picker state={state} />);
-    const row = await screen.findByTestId("pending-mine");
-    expect(row.textContent).toContain("Setup pending on this Mac");
+    const row = await screen.findByTestId("pending-local1a2b");
+    expect(row.textContent).toContain("My box");
     expect(row.tagName).not.toBe("BUTTON");
-    fireEvent.click(row);
+    fireEvent.click(screen.getByText("Start"));
+    await waitFor(() => expect(b.finishLocalSetup).toHaveBeenCalledWith("local1a2b"));
+    expect(b.createLocalWorkspace).not.toHaveBeenCalled();
     expect(b.pickWorkspace).not.toHaveBeenCalled();
   });
 
-  it("a pending row offers Finish setup, which resumes by slug and never creates a row", async () => {
-    const b = bridge({ workspaces: [ws({ name: "mine" })] });
+  it("a running local row opens by id and reads 'Runs on this Mac'", async () => {
+    const b = bridge({ workspaces: [ws({ name: "local1a2b", display_name: "My box", status: "running" })] });
     render(<Picker state={state} />);
-    await screen.findByTestId("pending-mine");
-    fireEvent.click(screen.getByText("Finish setup"));
-    await waitFor(() => expect(b.finishLocalSetup).toHaveBeenCalledWith("mine"));
-    expect(b.createLocalWorkspace).not.toHaveBeenCalled();
-  });
-
-  it("a pending row on a Mac that hosts another workspace is blocked, with no Finish setup", async () => {
-    bridge({
-      workspaces: [ws({ name: "mine" })],
-      getLocalHost: vi.fn(async () => ({ binary: true, linked: true, workspaceSlug: "other" })),
-    });
-    render(<Picker state={state} />);
-    const row = await screen.findByTestId("pending-mine");
-    expect(row.textContent).toContain("already hosts another workspace");
-    expect(screen.queryByText("Finish setup")).toBeNull();
-  });
-
-  it("marks the tile hosted on THIS Mac; other running local tiles read 'Runs on another machine'", async () => {
-    bridge({
-      workspaces: [ws({ name: "here", status: "running", remote_host_id: "rh_1" }), ws({ name: "away", status: "running" })],
-      getLocalHost: vi.fn(async () => ({ binary: true, linked: true, workspaceSlug: "here", remoteHostId: "rh_1" })),
-    });
-    render(<Picker state={state} />);
-    expect((await screen.findByTestId("here-here")).textContent).toContain("Runs on this Mac");
-    expect(screen.getByTestId("remote-away").textContent).toContain("Runs on another machine");
+    const row = await screen.findByTestId("here-local1a2b");
+    expect(row.textContent).toContain("Runs on this Mac");
+    fireEvent.click(row.querySelector("button")!);
+    expect(b.pickWorkspace).toHaveBeenCalledWith("local1a2b");
   });
 
   it("a done snapshot from main does not resurface the ready modal when the picker remounts", async () => {
@@ -146,14 +126,14 @@ describe("Picker landing", () => {
 
   it("Retry shows the refusal when it fails before emitting progress", async () => {
     const b = bridge({
-      finishLocalSetup: vi.fn(async () => ({ ok: false, code: "already_linked", error: "This Mac already hosts a workspace." })),
+      finishLocalSetup: vi.fn(async () => ({ ok: false, code: "bootstrap_running", error: "A setup is already running on this Mac." })),
     });
     render(<Picker state={state} />);
     await screen.findByTestId("local-block");
     emitProgress({ slug: "mine", phase: "failed", step: "podman", done: [], failedStep: "podman", error: "boom", lines: [] });
     fireEvent.click(await screen.findByText("Retry"));
     const msg = await screen.findByTestId("retry-error");
-    expect(msg.textContent).toContain("already hosts a workspace");
+    expect(msg.textContent).toContain("already running");
     expect(b.finishLocalSetup).toHaveBeenCalledWith("mine");
   });
 
@@ -164,16 +144,16 @@ describe("Picker landing", () => {
     emitProgress({
       slug: "mine",
       phase: "failed",
-      step: "podman",
-      done: ["cli", "token", "link"],
-      failedStep: "podman",
+      step: "image",
+      done: ["machine"],
+      failedStep: "image",
       error: "exited with code 1",
       lines: ["podman: FAILED", "machine init error"],
     });
     const err = await screen.findByTestId("bootstrap-error");
-    expect(err.textContent).toContain("Install Podman");
+    expect(err.textContent).toContain("Download the workspace image");
     expect(screen.getByTestId("bootstrap-log").textContent).toContain("machine init error");
-    expect(screen.getByTestId("step-podman").getAttribute("data-state")).toBe("failed");
+    expect(screen.getByTestId("step-image").getAttribute("data-state")).toBe("failed");
     fireEvent.click(screen.getByText("Retry"));
     expect(b.finishLocalSetup).toHaveBeenCalledWith("mine");
   });
@@ -252,15 +232,15 @@ describe("guided create", () => {
     try {
       const b = bridge();
       await openWizard(b);
-      await screen.findByTestId("dep-host");
-      expect(screen.getByTestId("dep-host").getAttribute("data-state")).toBe("missing");
-      b.depsList.mockResolvedValue(snapOf("installing", "missing", { items: [item("host", "installing", { progress: 40 }), item("podman", "missing"), item("machine", "missing", { plan: undefined })] }));
+      await screen.findByTestId("dep-podman");
+      expect(screen.getByTestId("dep-podman").getAttribute("data-state")).toBe("missing");
+      b.depsList.mockResolvedValue(snapOf("installed", "installing", { items: [item("podman", "installing", { progress: 40 }), item("machine", "missing", { plan: undefined })] }));
       await vi.advanceTimersByTimeAsync(3100);
-      await waitFor(() => expect(screen.getByTestId("dep-host").getAttribute("data-state")).toBe("installing"));
-      expect(screen.getByTestId("dep-host-state").textContent).toContain("40%");
+      await waitFor(() => expect(screen.getByTestId("dep-podman").getAttribute("data-state")).toBe("installing"));
+      expect(screen.getByTestId("dep-podman-state").textContent).toContain("40%");
       b.depsList.mockResolvedValue(allReady);
       await vi.advanceTimersByTimeAsync(3100);
-      await waitFor(() => expect(screen.getByTestId("dep-host").getAttribute("data-state")).toBe("installed"));
+      await waitFor(() => expect(screen.getByTestId("dep-podman").getAttribute("data-state")).toBe("installed"));
       expect((screen.getByTestId("deps-continue") as HTMLButtonElement).disabled).toBe(false);
     } finally {
       vi.useRealTimers();
@@ -268,7 +248,7 @@ describe("guided create", () => {
   });
 
   it("a failed install shows the error and a Retry; Continue stays disabled", async () => {
-    const b = bridge({ depsList: vi.fn(async () => snapOf("installed", "failed", { items: [item("host", "installed"), item("podman", "failed", { error: "checksum mismatch" }), item("machine", "missing", { plan: undefined })], ready: false })) });
+    const b = bridge({ depsList: vi.fn(async () => snapOf("installed", "failed", { items: [item("podman", "failed", { error: "checksum mismatch" }), item("machine", "missing", { plan: undefined })], ready: false })) });
     await openWizard(b);
     expect((await screen.findByTestId("dep-podman-error")).textContent).toContain("checksum mismatch");
     expect(screen.getByText("Retry")).toBeTruthy();
@@ -276,36 +256,14 @@ describe("guided create", () => {
   });
 
   it("an interrupted install is explained; an unsupported platform offers no install", async () => {
-    const b = bridge({ depsList: vi.fn(async () => ({ ...snapOf("missing", "missing"), supported: false, platform: "win32", interrupted: "podman" as DepId, items: [item("host", "missing", { plan: undefined }), item("podman", "missing", { plan: undefined })], ready: false })) });
+    const b = bridge({ depsList: vi.fn(async () => ({ ...snapOf("missing", "missing"), supported: false, platform: "win32", interrupted: "podman" as DepId, items: [item("podman", "missing", { plan: undefined })], ready: false })) });
     await openWizard(b);
     await screen.findByTestId("deps-interrupted");
     expect(screen.getByTestId("deps-unsupported").textContent).toContain("untested");
-    expect(screen.queryByTestId("dep-host-install")).toBeNull();
+    expect(screen.queryByTestId("dep-podman-install")).toBeNull();
   });
 
-  it("an already-linked Mac is blocked up front with the explanation", async () => {
-    const b = bridge({ getLocalHost: vi.fn(async () => ({ binary: true, linked: true, workspaceSlug: "fredericowu" })) });
-    await openWizard(b);
-    const msg = await screen.findByTestId("already-linked");
-    expect(msg.textContent).toContain("fredericowu");
-    expect(screen.queryByTestId("deps")).toBeNull();
-    expect(b.createLocalWorkspace).not.toHaveBeenCalled();
-  });
-
-  it("an already_linked refusal from main shows the block, not a generic error", async () => {
-    const b = bridge({
-      depsList: vi.fn(async () => allReady),
-      createLocalWorkspace: vi.fn(async () => ({ ok: false, code: "already_linked", error: "This Mac already hosts a workspace." })),
-    });
-    await openWizard(b);
-    await waitFor(() => expect((screen.getByTestId("deps-continue") as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByTestId("deps-continue"));
-    fireEvent.change(screen.getByLabelText("Sandbox name"), { target: { value: "x" } });
-    fireEvent.click(screen.getByText("Create sandbox"));
-    await screen.findByTestId("already-linked");
-  });
-
-  it("creates a remote-host workspace through the bridge with the typed name", async () => {
+  it("creates a local workspace through the bridge with the typed name", async () => {
     const b = bridge({ depsList: vi.fn(async () => allReady) });
     await openWizard(b);
     await waitFor(() => expect((screen.getByTestId("deps-continue") as HTMLButtonElement).disabled).toBe(false));

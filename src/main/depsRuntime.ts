@@ -5,8 +5,6 @@ import { join } from "node:path";
 import { app } from "electron";
 import type { DepId, DepsSnapshot } from "../shared/deps";
 import { buildSnapshot, DepInstaller, type DepProbe, type InstallOps } from "./dependencies";
-import { probeRuntimes } from "./runtimeProbe";
-import { realHostOps } from "./localBootstrap";
 
 const env = () => ({ platform: process.platform, arch: process.arch });
 const podmanBin = () => join(homedir(), "podman-dist", "podman", "bin", "podman");
@@ -21,12 +19,11 @@ function run(file: string, args: string[], timeout = 30_000): Promise<{ code: nu
 }
 
 export async function realProbe(): Promise<DepProbe> {
-  const hostBinary = realHostOps().findBinary() !== null;
   const p = podmanBin();
   const podman = existsSync(p) && (await run(p, ["--version"], 8000)).code === 0;
-  // Machine state counts any runtime that answers, same as the wizard's old check.
-  const machineRunning = (await probeRuntimes()).ready;
-  return { hostBinary, podman, machineRunning };
+  // The machine row no longer probes any runtime: a machine is created per workspace,
+  // and an answering runtime here would be the live workspace's default machine.
+  return { podman };
 }
 
 async function downloadWithProgress(url: string, onProgress: (p: number) => void): Promise<Uint8Array> {
@@ -47,13 +44,6 @@ async function downloadWithProgress(url: string, onProgress: (p: number) => void
 }
 
 const realOps: InstallOps = {
-  installHost: async (_onLine, onProgress) => {
-    onProgress(5);
-    await realHostOps().installBinary((l) => {
-      if (/verifying/.test(l)) onProgress(70);
-      if (/installed to/.test(l)) onProgress(100);
-    });
-  },
   download: (url, onProgress) => downloadWithProgress(url, onProgress),
   unpackPodmanPkg: async (pkg) => {
     const dir = mkdtempSync(join(tmpdir(), "aw-podman-"));

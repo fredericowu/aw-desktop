@@ -1,7 +1,7 @@
 import { BrowserWindow, shell } from "electron";
 import { join } from "node:path";
 import { is } from "./env";
-import { APEX } from "./config";
+import { isAllowedTarget } from "./navPolicy";
 
 const RENDERER_DEV_URL = process.env["ELECTRON_RENDERER_URL"];
 
@@ -44,7 +44,7 @@ export function createAuthWindow(): BrowserWindow {
  * this app's own privilege (hardening default #9). `will-navigate` is
  * allowlisted to the apex, and `window.open` is routed to the system
  * browser rather than spawning a second Electron window. */
-export function createShellWindow(url: string): BrowserWindow {
+export function createShellWindow(url: string, localOrigin?: string): BrowserWindow {
   const win = new BrowserWindow({
     width: 1280,
     height: 860,
@@ -58,7 +58,7 @@ export function createShellWindow(url: string): BrowserWindow {
   });
 
   win.webContents.on("will-navigate", (event, targetUrl) => {
-    if (!isAllowedHost(targetUrl)) {
+    if (!isAllowedTarget(targetUrl, localOrigin)) {
       event.preventDefault();
       shell.openExternal(targetUrl);
     }
@@ -71,13 +71,4 @@ export function createShellWindow(url: string): BrowserWindow {
 
   win.loadURL(url);
   return win;
-}
-
-function isAllowedHost(targetUrl: string): boolean {
-  try {
-    const host = new URL(targetUrl).hostname;
-    return host === APEX || host.endsWith(`.${APEX}`);
-  } catch {
-    return false;
-  }
 }

@@ -1,5 +1,5 @@
 /** Dependencies screen model: what a local workspace needs on this Mac. */
-export type DepId = "host" | "podman" | "machine";
+export type DepId = "podman" | "machine";
 export type DepState = "installed" | "missing" | "installing" | "waiting" | "failed";
 
 /** Exactly what an install would do, shown to the user BEFORE they approve it. */

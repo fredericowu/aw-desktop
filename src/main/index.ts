@@ -1,21 +1,22 @@
 import { app, ipcMain, powerMonitor, BrowserWindow, Menu } from "electron";
-import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { API_BASE, APEX, CONSOLE_BASE, workspaceUrl } from "./config";
+import { APEX, CONSOLE_BASE, workspaceUrl } from "./config";
 import * as api from "./apiClient";
 import { ApiError } from "./apiClient";
 import { loadToken, saveToken, clearToken } from "./authStore";
-import { injectIdentityCookie, clearIdentityCookie } from "./cookie";
+import { injectIdentityCookie, clearIdentityCookie, injectLocalIdentityCookie, clearLocalIdentityCookies } from "./cookie";
 import { registerProtocolHandler, startGoogleSignInHandoff } from "./oauth";
 import { createAuthWindow, createShellWindow } from "./windows";
 import { checkForUpdates } from "./updater";
 import { guardedOpen, persistSessionSafely } from "./safeOpen";
 import { probeRuntimes } from "./runtimeProbe";
+import { LocalWorkspaces, identityPublicKey } from "./localWorkspaces";
+import { LocalLimitReachedError } from "./localRegistry";
 import { depsInstall, depsSnapshot, initDeps } from "./depsRuntime";
 import type { DepId } from "../shared/deps";
-import { openIfCurrent, SessionScope, type SessionHandle, SetupSlot, scopedExclusive, killActiveBootstrap, preflightFor, readHostStatus, realHostOps, runBootstrapFlow } from "./localBootstrap";
-import { decidePreflight, fail, startProgress } from "./bootstrapCore";
-import type { ApiResult, AuthState, AwUser, BootstrapProgress, WorkspaceInfo, WorkspaceListData } from "../shared/types";
+import { openIfCurrent, SessionScope, type SessionHandle, SetupSlot, scopedExclusive } from "./localBootstrap";
+import { advance, complete, fail, startProgress } from "../shared/bootstrapState";
+import { LOCAL_PLACEMENT } from "../shared/workspaces";
+import type { AccountInfo, ApiResult, AuthState, AwUser, BootstrapProgress, WorkspaceInfo, WorkspaceListData } from "../shared/types";
 
 // macOS only (Phase 1, per Architect design) — a second instance just
 // focuses the first rather than opening twice, which also keeps a single
@@ -25,7 +26,6 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 const REFRESH_INTERVAL_MS = 30 * 60 * 1000;
-const ACCOUNT_TIMEOUT_MS = 4000;
 
 let authWindow: BrowserWindow | null = null;
 let shellWindow: BrowserWindow | null = null;
@@ -35,6 +35,15 @@ let bootstrapProgress: BootstrapProgress | null = null;
 const setupSlot = new SetupSlot();
 /** A setup job belongs to the sign-in session that started it. */
 const sessionScope = new SessionScope();
+
+const local = new LocalWorkspaces(
+  () => currentToken,
+  async (t) => (await api.accountMe(t)).limits?.max_local_workspaces,
+);
+/** Loopback UI port of the open local workspace window, if any (cookie refresh + cleanup). */
+let shellLocalPort: number | null = null;
+/** Account key for the per-account cap: the identity user id. */
+const currentSub = (): string => String(state.user?.id ?? "");
 
 let state: AuthState = { stage: "splash", user: null, error: null, apex: APEX, openError: null, storageWarning: null };
 
@@ -56,6 +65,7 @@ function teardownToLogin(error: string | null = null): void {
   bootstrapProgress = null;
   clearToken();
   clearIdentityCookie().catch(() => undefined);
+  clearLocalCookies();
   shellWindow?.close();
   shellWindow = null;
   if (!authWindow || authWindow.isDestroyed()) authWindow = createAuthWindow();
@@ -66,6 +76,12 @@ function teardownToLogin(error: string | null = null): void {
 /** Every authenticated user lands on the Local/Cloud picker — with 0, 1 or
  * N memberships. The picker is where the guided local create lives, so a
  * single membership no longer skips it. */
+function clearLocalCookies(): void {
+  const ports = local.registry.list().map((w) => w.uiPort);
+  shellLocalPort = null;
+  void clearLocalIdentityCookies(ports).catch(() => undefined);
+}
+
 function routeAfterAuth(user: AwUser): void {
   setState({ stage: "picker", user, error: null });
 }
@@ -76,20 +92,25 @@ async function openWorkspace(slug: string, isCurrent: () => boolean = () => true
     return false;
   }
   const token = currentToken;
+  const localWs = local.registry.get(slug);
+  if (localWs && localWs.sub !== currentSub()) return false;
   setState({ stage: "loading-workspace", error: null, openError: null });
   return guardedOpen(
     slug,
     () =>
       openIfCurrent(
         isCurrent,
-        () => injectIdentityCookie(token),
+        () => (localWs ? injectLocalIdentityCookie(token, localWs.uiPort) : injectIdentityCookie(token)),
         () => {
           liveAuthWindow()?.hide();
-          shellWindow = createShellWindow(workspaceUrl(slug));
+          shellLocalPort = localWs ? localWs.uiPort : null;
+          shellWindow = localWs
+            ? createShellWindow(`http://127.0.0.1:${localWs.uiPort}/`, `http://127.0.0.1:${localWs.uiPort}`)
+            : createShellWindow(workspaceUrl(slug));
           watchForSessionExpiry(shellWindow);
         },
         // Signed out while the cookie was being written: don't leave it behind.
-        () => void clearIdentityCookie().catch(() => undefined),
+        () => (localWs ? clearLocalCookies() : void clearIdentityCookie().catch(() => undefined)),
       ),
     // A cookie/window failure must not strand the picker on "Opening your workspace...".
     (openError) => {
@@ -143,7 +164,10 @@ async function refreshLoop(): Promise<void> {
     const { token, user } = await api.refresh(currentToken);
     currentToken = token;
     persistSessionSafely(() => saveToken(token));
-    if (shellWindow) await injectIdentityCookie(token);
+    if (shellWindow) {
+      if (shellLocalPort) await injectLocalIdentityCookie(token, shellLocalPort);
+      else await injectIdentityCookie(token);
+    }
     setState({ user });
   } catch (err) {
     if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
@@ -179,60 +203,39 @@ function emitBootstrap(p: BootstrapProgress, isCurrent: () => boolean = () => tr
   }
 }
 
-/** When the CLI last detached per slug, persisted so a relaunch does not start a second installer. */
-const handoffStore = {
-  file: () => join(app.getPath("userData"), "bootstrap-handoff.json"),
-  read(): Record<string, number> {
-    try {
-      return JSON.parse(readFileSync(this.file(), "utf8")) as Record<string, number>;
-    } catch {
-      return {};
-    }
-  },
-  lastLaunchedAt(slug: string): number | null {
-    return this.read()[slug] ?? null;
-  },
-  markLaunched(slug: string, at: number): void {
-    try {
-      writeFileSync(this.file(), JSON.stringify({ ...this.read(), [slug]: at }));
-    } catch {
-      // best effort: worst case a Retry re-runs the (idempotent) bootstrap
-    }
-  },
-};
-
-/** Caller must already hold the slot; this releases it. */
-async function startBootstrap(slug: string, scope: SessionHandle): Promise<void> {
-  // The job only ever acts as the session that started it.
-  const live = () => {
-    if (!scope.isCurrent() || !currentToken) throw new Error("session_lost");
-    return currentToken;
-  };
+/** Caller must already hold the slot; this releases it. Brings the local workspace up, then opens it. */
+async function startLocal(id: string, scope: SessionHandle): Promise<void> {
   try {
-    const result = await runBootstrapFlow(slug, {
-      ops: realHostOps(),
-      // The token only ever lives in this closure's return value: not logged, not persisted.
-      mintToken: async (s) => (await api.mintBootstrapToken(live(), s)).token,
-      getStatus: async (s, signal) => (await api.getWorkspace(live(), s, signal)).status,
-      getRowHostId: async (s) => (await api.getWorkspace(live(), s)).remote_host_id ?? null,
-      controlPlane: API_BASE,
-      emit: (p) => emitBootstrap(p, scope.isCurrent),
-      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-      now: () => Date.now(),
-      signal: scope.signal,
-      handoff: handoffStore,
+    if (!scope.isCurrent() || !currentToken) throw new Error("session_lost");
+    emitBootstrap(startProgress(id), scope.isCurrent);
+    const key = await identityPublicKey();
+    await local.start(id, key, (step) => {
+      if (bootstrapProgress && bootstrapProgress.slug === id) emitBootstrap(advance(bootstrapProgress, step), scope.isCurrent);
     });
-    if (result.phase === "done" && scope.isCurrent()) {
-      await openWorkspace(slug, scope.isCurrent);
+    if (scope.isCurrent()) {
+      emitBootstrap(complete(bootstrapProgress ?? startProgress(id)), scope.isCurrent);
+      await openWorkspace(id, scope.isCurrent);
       // A done snapshot must not resurface when the picker is shown again.
       bootstrapProgress = null;
     }
   } catch (err) {
-    emitBootstrap(fail(bootstrapProgress ?? startProgress(slug), err instanceof Error ? err.message : String(err)), scope.isCurrent);
+    emitBootstrap(fail(bootstrapProgress ?? startProgress(id), err instanceof Error ? err.message : String(err)), scope.isCurrent);
   } finally {
     scope.finish();
     setupSlot.release();
   }
+}
+
+/** Picking a local workspace that is not running yet starts it (same path as Finish setup). */
+async function window_startLocal(id: string): Promise<{ ok: boolean; error?: string }> {
+  const ws = local.registry.get(id);
+  if (!ws || ws.sub !== currentSub()) return { ok: false, error: "unknown_workspace" };
+  const r = await scopedExclusive<{ ok: boolean; error?: string }>(setupSlot, sessionScope, { ok: false, error: "A setup is already running on this Mac." }, async (scope, handOff) => {
+    handOff();
+    void startLocal(id, scope);
+    return { ok: true };
+  });
+  return r;
 }
 
 function registerIpcHandlers(): void {
@@ -290,6 +293,11 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle("aw:pickWorkspace", async (_e, slug: string) => {
+    const lw = local.registry.get(slug);
+    if (lw && !local.isRunning(slug)) {
+      const r = await window_startLocal(slug);
+      return r;
+    }
     const ok = await openWorkspace(slug);
     return ok ? { ok: true } : { ok: false, error: state.openError?.message ?? "open_failed" };
   });
@@ -297,14 +305,13 @@ function registerIpcHandlers(): void {
   ipcMain.handle("aw:listWorkspaces", async (): Promise<ApiResult<WorkspaceListData>> => {
     if (!currentToken) return { ok: false, error: "session_lost" };
     try {
-      const workspaces = await api.listWorkspaces(currentToken);
-      // limits/local_count only exist on a backend with max_local_workspaces;
-      // a failure here must not hide the list.
-      const account = await Promise.race([
-        api.accountMe(currentToken).catch(() => null),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), ACCOUNT_TIMEOUT_MS)),
-      ]);
-      return { ok: true, data: { workspaces, account } };
+      const cloud = (await api.listWorkspaces(currentToken)).filter((w) => w.placement_driver !== LOCAL_PLACEMENT);
+      const sub = currentSub();
+      const limit = await local.registry.resolveLimit(sub);
+      const mine = local.rowsFor(sub);
+      // Local rows come from this Mac's registry, never from the backend; the cap is per account.
+      const account: AccountInfo = { limits: { max_local_workspaces: limit }, local_count: mine.length };
+      return { ok: true, data: { workspaces: [...mine, ...cloud], account } };
     } catch (err) {
       return apiFailure(err, "list_failed");
     }
@@ -325,55 +332,51 @@ function registerIpcHandlers(): void {
   ipcMain.handle("aw:depsList", () => depsSnapshot());
   ipcMain.handle("aw:depsInstall", (_e, id: DepId, approved: boolean) => depsInstall(id, approved === true));
 
-  ipcMain.handle("aw:getLocalHost", () => readHostStatus(realHostOps()));
   ipcMain.handle("aw:getBootstrapProgress", () => bootstrapProgress);
 
-  // Pre-flight FIRST: a Mac that already hosts a workspace is refused before
-  // a row exists or a token is minted. Then the REAL BYOD row, then the
-  // bootstrap runs in the background (progress over aw:bootstrap-progress).
   const BUSY = { ok: false, error: "A setup is already running on this Mac.", code: "bootstrap_running" } as const;
 
+  // Cap is enforced HERE (main process), per signed-in account, before anything is created.
   ipcMain.handle("aw:createLocalWorkspace", async (_e, name: string): Promise<ApiResult<WorkspaceInfo>> => {
     if (!currentToken) return { ok: false, error: "session_lost" };
-    const token = currentToken;
-    // Bound to the session at IPC entry, before any await: a response that
-    // lands after sign-out/sign-in must never run as the new user.
+    const sub = currentSub();
+    if (!sub) return { ok: false, error: "session_lost" };
+    // Bound to the session at IPC entry, before any await.
     return scopedExclusive<ApiResult<WorkspaceInfo>>(setupSlot, sessionScope, BUSY, async (scope, handOff) => {
       try {
-        const pre = decidePreflight(await readHostStatus(realHostOps()));
-        if (pre.action === "block") return { ok: false, error: pre.message, code: "already_linked" };
-        if (!scope.isCurrent()) return { ok: false, error: "session_lost" };
-        const row = await api.createWorkspace(token, name);
-        // The row exists for the original account; only that session may drive it.
+        const ws = await local.registry.create(sub, name);
+        const row = local_row(ws.id);
         if (!scope.isCurrent()) return { ok: true, data: row };
         handOff();
-        void startBootstrap(row.name, scope);
+        void startLocal(ws.id, scope);
         return { ok: true, data: row };
       } catch (err) {
+        if (err instanceof LocalLimitReachedError) {
+          return { ok: false, error: err.message, code: "plan_limit_local_workspaces", status: 402, limit: err.limit };
+        }
         return apiFailure(err, "create_failed");
       }
     });
   });
 
-  // Resume/retry for a row that exists but never came up: never creates a row.
-  ipcMain.handle("aw:finishLocalSetup", async (_e, slug: string): Promise<ApiResult<null>> => {
+  // Start / resume / retry an existing local workspace: never creates one.
+  ipcMain.handle("aw:finishLocalSetup", async (_e, id: string): Promise<ApiResult<null>> => {
     if (!currentToken) return { ok: false, error: "session_lost" };
     return scopedExclusive<ApiResult<null>>(setupSlot, sessionScope, BUSY, async (scope, handOff) => {
-      try {
-        const tk = currentToken as string;
-        const pre = await preflightFor(await readHostStatus(realHostOps()), slug, async (s) => (await api.getWorkspace(tk, s)).remote_host_id ?? null);
-        if (pre.action === "block") return { ok: false, error: pre.message, code: "already_linked" };
-        if (!scope.isCurrent()) return { ok: false, error: "session_lost" };
-        handOff();
-        void startBootstrap(slug, scope);
-        return { ok: true, data: null };
-      } catch (err) {
-        return apiFailure(err, "setup_failed");
-      }
+      const ws = local.registry.get(id);
+      if (!ws || ws.sub !== currentSub()) return { ok: false, error: "unknown_workspace" };
+      handOff();
+      void startLocal(id, scope);
+      return { ok: true, data: null };
     });
   });
 
   ipcMain.handle("aw:logout", () => logout());
+}
+
+function local_row(id: string): WorkspaceInfo {
+  const w = local.registry.get(id)!;
+  return local.rowsFor(w.sub).find((r) => r.name === id)!;
 }
 
 /** Best-effort server logout (3s cap) — teardown ALWAYS runs, so a failed
@@ -444,7 +447,14 @@ app.whenReady().then(async () => {
   void checkForUpdates();
 });
 
-app.on("before-quit", () => killActiveBootstrap());
+let quitting = false;
+app.on("before-quit", (event) => {
+  if (quitting) return;
+  quitting = true;
+  event.preventDefault();
+  // Local workspaces only run while the app runs: stop their machines, then really quit.
+  void local.stopAll().finally(() => app.exit(0));
+});
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
