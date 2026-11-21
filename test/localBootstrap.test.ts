@@ -351,7 +351,7 @@ describe("round 7 regressions", () => {
   });
 
   it("error/stopped row on a Mac that reports provisioned: relaunch is allowed", async () => {
-    const o = ops({ runStatus: async () => "linked: yes (remote_host_id=r)\nworkspace: w\nprovisioned: yes" });
+    const o = ops({ runStatus: async () => "linked: yes (remote_host_id=r)\nworkspace: w\npodman: healthy\npostgres: healthy" });
     let n = 0;
     const { d } = deps(o, { getRowHostId: async () => "r", handoff: handoff(null).h, getStatus: async () => (n++ === 0 ? "stopped" : "running") });
     const p = await runBootstrapFlow("w", d);
@@ -379,6 +379,17 @@ describe("round 7 regressions", () => {
     expect(p.phase).toBe("failed");
     expect(p.error).toContain("no longer running");
     expect(o.runBootstrap).not.toHaveBeenCalled();
+  });
+
+  it("status API outage past the idle window does not fail the wait", async () => {
+    const o = linked();
+    let t = 1_000 + 3 * MIN;
+    let calls = 0;
+    o.installerInFlight = () => calls++ === 0;
+    let n = 0;
+    const { d } = deps(o, { getRowHostId: async () => "r", handoff: handoff(1_000).h, now: () => t, sleep: async () => void (t += 30_000), pollTimeoutMs: 60 * MIN, getStatus: async () => { n++; if (n === 1) return "provisioning"; if (n <= 7) throw new Error("net"); return "running"; } });
+    const p = await runBootstrapFlow("w", d);
+    expect(p.phase).toBe("done");
   });
 
   it("a row turning error mid-wait fails immediately", async () => {

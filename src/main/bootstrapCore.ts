@@ -50,12 +50,15 @@ export function parseStatus(output: string): Omit<LocalHostStatus, "binary"> {
   if (linked[1] === "no") return { linked: false };
   const id = /remote_host_id=([^\s)]+)/.exec(output)?.[1];
   const slug = /(?:^|\s)workspace: (\S+)\s*$/m.exec(output)?.[1];
+  // v0.1.150 prints "provisioned: no" only for a lean link; a provisioned host
+  // prints per-module health lines instead and never "provisioned: yes".
   const prov = /(?:^|\s)provisioned: (yes|no)\b/m.exec(output);
+  const modules = /(?:^|\s)(?:podman|postgres|redis|workspace): (?:healthy|not healthy)\b/m.test(output);
   return {
     linked: true,
     remoteHostId: id,
     workspaceSlug: slug,
-    provisioned: prov ? prov[1] === "yes" : undefined,
+    provisioned: prov ? prov[1] === "yes" : modules ? true : undefined,
   };
 }
 
@@ -75,8 +78,12 @@ export function lockInFlight(
   mtimeMs: number | null,
   nowMs: number,
   pidAlive: (pid: number) => boolean,
+  probe?: () => "held" | "free" | "unknown",
 ): boolean {
-  if (content === null || content.trim() === "") return false;
+  if (content === null) return false;
+  // Blank is also what a holder looks like between taking the flock and writing
+  // its metadata (or when that write failed): only the kernel lock can say.
+  if (content.trim() === "") return probe ? probe() !== "free" : false;
   let parsed: { pid?: unknown; started_at?: unknown } | null = null;
   try {
     parsed = JSON.parse(content);

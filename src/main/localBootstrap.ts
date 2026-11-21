@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -172,7 +172,8 @@ export async function runBootstrapFlow(slug: string, deps: FlowDeps): Promise<Bo
       if (DEAD_STATUSES.has(status)) throw new Error(`The control plane now reports this workspace as "${status}". Retry to try again.`);
       const now = deps.now();
       if (now >= settleEnd) {
-        if (deps.ops.installerInFlight()) idleSince = null;
+        // Only a confirmed "provisioning" row may count down: a status API hiccup ("") is not evidence of failure.
+        if (status !== "provisioning" || deps.ops.installerInFlight()) idleSince = null;
         else {
           idleSince ??= now;
           if (now - idleSince >= (deps.idleFailMs ?? IDLE_FAIL_MS)) {
@@ -487,13 +488,27 @@ export function realHostOps(): HostOps {
       const file = join(homedir(), ".aw-remote-host", "workspace-lifecycle.lock");
       try {
         const content = readFileSync(file, "utf8");
-        return lockInFlight(content, statSync(file).mtimeMs, Date.now(), pidAlive);
+        return lockInFlight(content, statSync(file).mtimeMs, Date.now(), pidAlive, () => probeLock(file));
       } catch {
         return false;
       }
     },
     killBootstrap: killActiveBootstrap,
   };
+}
+
+/** Non-blocking flock probe of the host's lifecycle lock (aw-remote-host takes
+ * LOCK_EX|LOCK_NB on this file). macOS ships /usr/bin/perl; exit 0 = we got the
+ * lock (free), 1 = held, anything else (no perl, error) = unknown. */
+function probeLock(file: string): "held" | "free" | "unknown" {
+  const r = spawnSync(
+    "/usr/bin/perl",
+    ["-e", 'use Fcntl qw(:flock); open(my $f, "<", $ARGV[0]) or exit 2; exit(flock($f, LOCK_SH|LOCK_NB) ? 0 : 1);', file],
+    { timeout: 5000 },
+  );
+  if (r.status === 0) return "free";
+  if (r.status === 1) return "held";
+  return "unknown";
 }
 
 function pidAlive(pid: number): boolean {

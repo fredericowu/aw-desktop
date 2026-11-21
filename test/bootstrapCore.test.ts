@@ -188,3 +188,22 @@ describe("lockInFlight", () => {
     expect(lockInFlight("verb=bootstrap", now - HOST_VERB_BOUND_MS - 1, now, () => false)).toBe(false);
   });
 });
+
+describe("lockInFlight blank file + kernel probe", () => {
+  const now = 10_000_000_000;
+  it("blank + held/unknown => in flight; blank + free => idle", () => {
+    expect(lockInFlight("", now, now, () => true, () => "held")).toBe(true);
+    expect(lockInFlight("", now, now, () => true, () => "unknown")).toBe(true);
+    expect(lockInFlight("", now, now, () => true, () => "free")).toBe(false);
+  });
+});
+
+describe("parseStatus provisioned (pinned v0.1.150 output)", () => {
+  it("module health lines => provisioned", () => {
+    const out = "2026/11/21 linked: yes (remote_host_id=r)\nworkspace: w\npodman: healthy\npostgres: not healthy\nx";
+    expect(parseStatus(out).provisioned).toBe(true);
+  });
+  it("lean link prints provisioned: no", () => {
+    expect(parseStatus("linked: yes (remote_host_id=r)\nworkspace: w\nprovisioned: no (lean link)").provisioned).toBe(false);
+  });
+});
