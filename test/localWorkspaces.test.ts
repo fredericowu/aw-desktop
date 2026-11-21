@@ -25,9 +25,19 @@ describe("local workspace view", () => {
   it("runtime config uses the vendored podman, app-private homes and ~/aw-workspaces, never the default machine home", () => {
     const c = runtimeConfig("/ud", "/Users/x");
     expect(c.podmanPath).toBe("/Users/x/podman-dist/podman/bin/podman");
-    expect(c.homesRoot).toBe("/ud/local-runtimes");
+    expect(c.homesRoot).toBe("/Users/x/.awd");
     expect(c.dataRoot).toBe("/Users/x/aw-workspaces");
     expect(c.path.startsWith("/Users/x/podman-dist/podman/bin:")).toBe(true);
+  });
+});
+
+describe("podman unix socket path length", () => {
+  it("keeps <home>/.podman/aw-<id>-ignition.sock within macOS's 103-byte sun_path limit", () => {
+    // id is "local" + 6 hex; a 20-char username is already longer than typical.
+    const home = "/Users/abcdefghijklmnopqrst";
+    const c = runtimeConfig(`${home}/Library/Application Support/aw-desktop`, home);
+    const sock = `${c.homesRoot}/localf7823d/home/.podman/aw-localf7823d-ignition.sock`;
+    expect(Buffer.byteLength(sock)).toBeLessThanOrEqual(103);
   });
 });
 

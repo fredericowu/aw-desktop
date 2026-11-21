@@ -36,11 +36,15 @@ export function toWorkspaceInfo(ws: LocalWorkspace, running: boolean): Workspace
 
 export const podmanBinPath = (home = homedir()) => join(home, "podman-dist", "podman", "bin", "podman");
 
-export function runtimeConfig(userData: string, home = homedir()): RuntimeConfig {
+/** macOS caps a unix socket path at 103 bytes. podman creates
+ * <home>/.podman/aw-<id>-ignition.sock, so the per-workspace HOME must be short:
+ * under ~/Library/Application Support/aw-desktop it was 117 bytes and
+ * `podman machine start` died with "bind: invalid argument". */
+export function runtimeConfig(_userData: string, home = homedir()): RuntimeConfig {
   const bin = dirname(podmanBinPath(home));
   return {
     podmanPath: podmanBinPath(home),
-    homesRoot: join(userData, "local-runtimes"),
+    homesRoot: join(home, ".awd"),
     dataRoot: join(home, "aw-workspaces"),
     path: `${bin}:/usr/bin:/bin:/usr/sbin:/sbin`,
     arch: process.arch,
