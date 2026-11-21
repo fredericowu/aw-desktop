@@ -488,17 +488,34 @@ export function realHostOps(): HostOps {
         child.on("close", (code) => resolve(code));
         activeChild = child;
       }),
-    installerInFlight: () => {
-      const file = join(homedir(), ".aw-remote-host", "workspace-lifecycle.lock");
-      try {
-        const content = readFileSync(file, "utf8");
-        return lockInFlight(content, statSync(file).mtimeMs, Date.now(), pidAlive, () => probeLock(file));
-      } catch {
-        return false;
-      }
-    },
+    installerInFlight: () =>
+      lockFileInFlight(
+        join(homedir(), ".aw-remote-host", "workspace-lifecycle.lock"),
+        (f) => ({ content: readFileSync(f, "utf8"), mtimeMs: statSync(f).mtimeMs }),
+        Date.now(),
+        pidAlive,
+        probeLock,
+      ),
     killBootstrap: killActiveBootstrap,
   };
+}
+
+/** Lock-file gate. Only a missing file proves "no installer"; any other read
+ * failure (EACCES, EIO...) leaves the state unknown, so assume in flight and
+ * never relaunch a second bootstrap on top of a possibly-live one. */
+export function lockFileInFlight(
+  file: string,
+  read: (file: string) => { content: string; mtimeMs: number },
+  nowMs: number,
+  alive: (pid: number) => boolean,
+  probe: (file: string) => "held" | "free" | "unknown",
+): boolean {
+  try {
+    const { content, mtimeMs } = read(file);
+    return lockInFlight(content, mtimeMs, nowMs, alive, () => probe(file));
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code !== "ENOENT";
+  }
 }
 
 /** Non-blocking flock probe of the host's lifecycle lock (aw-remote-host takes
