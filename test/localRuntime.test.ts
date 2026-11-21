@@ -24,7 +24,7 @@ const cfg: RuntimeConfig = {
   arch: "arm64",
 };
 const mkWs = (id: string, uiPort = 9031, apiPort = 9032): LocalWorkspace => ({
-  id, name: id, uiPort, apiPort, createdAt: "t", cloud: "none",
+  id, name: id, sub: "subA", uiPort, apiPort, createdAt: "t", cloud: "none",
 });
 const ok = (stdout = ""): RunResult => ({ code: 0, stdout, stderr: "" });
 

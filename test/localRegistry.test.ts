@@ -55,17 +55,17 @@ describe("registry persistence", () => {
   it("persists records with cloud none and reloads them", async () => {
     const dir = mkdtempSync(join(tmpdir(), "reg-"));
     const path = join(dir, "sub", "local-workspaces.json");
-    const a = await mk(fileStore(path)).create("Home");
+    const a = await mk(fileStore(path)).create("subA", "Home");
     const again = new LocalRegistry({ store: fileStore(path) }).list();
     expect(again).toEqual([a]);
-    expect(a).toMatchObject({ name: "Home", uiPort: 9031, apiPort: 9032, cloud: "none" });
+    expect(a).toMatchObject({ name: "Home", sub: "subA", uiPort: 9031, apiPort: 9032, cloud: "none" });
     expect(a.id).toMatch(/^local[a-z0-9]+$/);
   });
   it("second workspace gets different ports; remove frees the record", async () => {
     const s = memStore();
     const r = mk(s, { fetchMaxLocal: async () => 5 });
-    const a = await r.create("a");
-    const b = await r.create("b");
+    const a = await r.create("subA", "a");
+    const b = await r.create("subA", "b");
     expect(new Set([a.uiPort, a.apiPort, b.uiPort, b.apiPort]).size).toBe(4);
     expect(r.remove(a.id)).toBe(true);
     expect(r.list().map((w) => w.id)).toEqual([b.id]);
@@ -81,32 +81,69 @@ describe("registry persistence", () => {
 describe("cap", () => {
   it("throws LocalLimitReachedError at the backend limit", async () => {
     const r = mk(memStore(), { fetchMaxLocal: async () => 2 });
-    await r.create("a");
-    await r.create("b");
-    const err = await r.create("c").catch((e) => e);
+    await r.create("subA", "a");
+    await r.create("subA", "b");
+    const err = await r.create("subA", "c").catch((e) => e);
     expect(err).toBeInstanceOf(LocalLimitReachedError);
     expect(err).toMatchObject({ limit: 2, count: 2, code: "local_limit_reached" });
   });
   it("uses a raised limit from the backend", async () => {
     const r = mk(memStore(), { fetchMaxLocal: async () => 3 });
-    for (const x of ["a", "b", "c"]) await r.create(x);
-    await expect(r.create("d")).rejects.toBeInstanceOf(LocalLimitReachedError);
+    for (const x of ["a", "b", "c"]) await r.create("subA", x);
+    await expect(r.create("subA", "d")).rejects.toBeInstanceOf(LocalLimitReachedError);
   });
   it("uses the cached last-known limit when offline", async () => {
     const s = memStore();
-    await mk(s, { fetchMaxLocal: async () => 1 }).resolveLimit();
+    await mk(s, { fetchMaxLocal: async () => 1 }).resolveLimit("subA");
     const offline = mk(s, {
       fetchMaxLocal: async () => {
         throw new Error("ENOTFOUND");
       },
     });
-    expect(await offline.resolveLimit()).toBe(1);
-    await offline.create("a");
-    await expect(offline.create("b")).rejects.toBeInstanceOf(LocalLimitReachedError);
+    expect(await offline.resolveLimit("subA")).toBe(1);
+    await offline.create("subA", "a");
+    await expect(offline.create("subA", "b")).rejects.toBeInstanceOf(LocalLimitReachedError);
   });
   it("falls back to 2 with no cache and no backend value", async () => {
-    expect(await mk(memStore(), { fetchMaxLocal: async () => undefined }).resolveLimit()).toBe(2);
-    expect(await mk(memStore()).resolveLimit()).toBe(2);
+    expect(await mk(memStore(), { fetchMaxLocal: async () => undefined }).resolveLimit("subA")).toBe(2);
+    expect(await mk(memStore()).resolveLimit("subA")).toBe(2);
+  });
+});
+
+describe("per-account cap", () => {
+  it("counts only the signed-in sub's records on a shared store", async () => {
+    const s = memStore();
+    const a = mk(s, { fetchMaxLocal: async () => 2 });
+    await a.create("subA", "a1");
+    await a.create("subA", "a2");
+    await expect(a.create("subA", "a3")).rejects.toBeInstanceOf(LocalLimitReachedError);
+    const b = mk(s, { fetchMaxLocal: async () => 1 });
+    const ws = await b.create("subB", "b1");
+    expect(ws.sub).toBe("subB");
+    expect(b.listFor("subA")).toHaveLength(2);
+    expect(b.listFor("subB")).toHaveLength(1);
+    const err = await b.create("subB", "b2").catch((e) => e);
+    expect(err).toMatchObject({ limit: 1, count: 1 });
+  });
+  it("caches the limit per sub for offline use", async () => {
+    const s = memStore();
+    await mk(s, { fetchMaxLocal: async () => 5 }).resolveLimit("subA");
+    await mk(s, { fetchMaxLocal: async () => 1 }).resolveLimit("subB");
+    const offline = mk(s, {
+      fetchMaxLocal: async () => {
+        throw new Error("ENOTFOUND");
+      },
+    });
+    expect(await offline.resolveLimit("subA")).toBe(5);
+    expect(await offline.resolveLimit("subB")).toBe(1);
+    expect(await offline.resolveLimit("subC")).toBe(2);
+  });
+  it("passes the sub to the limit fetch and rejects an empty sub", async () => {
+    const seen: string[] = [];
+    const r = mk(memStore(), { fetchMaxLocal: async (sub) => (seen.push(sub), 3) });
+    await r.create("subA", "a");
+    expect(seen).toEqual(["subA"]);
+    await expect(r.create("", "x")).rejects.toThrow(/sub is required/);
   });
 });
 
@@ -114,7 +151,7 @@ describe("reconcilePorts", () => {
   it("keeps free ports, bumps busy ones, persists the bump", async () => {
     const s = memStore();
     const r = mk(s);
-    const ws = await r.create("a");
+    const ws = await r.create("subA", "a");
     expect(await r.reconcilePorts(ws.id)).toMatchObject({ uiChanged: false, apiChanged: false });
     const busy = new LocalRegistry({ store: s, isPortFree: freeExcept([ws.uiPort]) });
     const res = await busy.reconcilePorts(ws.id);
@@ -125,7 +162,7 @@ describe("reconcilePorts", () => {
   });
   it("a port held by our own container is not bumped", async () => {
     const s = memStore();
-    const ws = await mk(s).create("a");
+    const ws = await mk(s).create("subA", "a");
     const r = new LocalRegistry({ store: s, isPortFree: freeExcept([ws.apiPort]) });
     expect((await r.reconcilePorts(ws.id, (p) => p === ws.apiPort)).apiChanged).toBe(false);
   });
