@@ -14,6 +14,8 @@ export const DEFAULT_MAX_LOCAL = 2;
 export interface LocalWorkspace {
   id: string;
   name: string;
+  /** Identity `sub` of the account that created it; the cap counts per sub. */
+  sub: string;
   uiPort: number;
   apiPort: number;
   createdAt: string;
@@ -24,8 +26,8 @@ export interface LocalWorkspace {
 export interface RegistryFile {
   version: 1;
   workspaces: LocalWorkspace[];
-  /** Last limits.max_local_workspaces seen, so the cap works offline. */
-  cachedMaxLocal?: number;
+  /** Last limits.max_local_workspaces seen per account `sub`, so the cap works offline. */
+  cachedMaxLocalBySub?: Record<string, number>;
 }
 
 export class LocalLimitReachedError extends Error {
@@ -108,7 +110,7 @@ export interface LocalRegistryDeps {
   now?: () => Date;
   newId?: () => string;
   /** Returns limits.max_local_workspaces from GET /api/accounts/me (undefined if the backend omits it). */
-  fetchMaxLocal?: () => Promise<number | undefined>;
+  fetchMaxLocal?: (sub: string) => Promise<number | undefined>;
 }
 
 export function newLocalId(): string {
@@ -121,8 +123,12 @@ function parse(raw: string | null): RegistryFile {
   try {
     const j = JSON.parse(raw) as Partial<RegistryFile>;
     const workspaces = Array.isArray(j.workspaces) ? j.workspaces.filter(isRecord) : [];
-    const cached = typeof j.cachedMaxLocal === "number" ? j.cachedMaxLocal : undefined;
-    return { version: 1, workspaces, ...(cached !== undefined ? { cachedMaxLocal: cached } : {}) };
+    const cached: Record<string, number> = {};
+    const bySub = j.cachedMaxLocalBySub;
+    if (bySub && typeof bySub === "object") {
+      for (const [k, v] of Object.entries(bySub)) if (typeof v === "number") cached[k] = v;
+    }
+    return { version: 1, workspaces, cachedMaxLocalBySub: cached };
   } catch {
     return { version: 1, workspaces: [] };
   }
@@ -134,6 +140,8 @@ function isRecord(w: unknown): w is LocalWorkspace {
   return (
     typeof r.id === "string" &&
     typeof r.name === "string" &&
+    typeof r.sub === "string" &&
+    r.sub !== "" &&
     typeof r.uiPort === "number" &&
     typeof r.apiPort === "number" &&
     typeof r.createdAt === "string"
@@ -158,8 +166,14 @@ export class LocalRegistry {
     this.deps.store.write(JSON.stringify(f, null, 2));
   }
 
+  /** Every record in the store (all accounts); used for port allocation. */
   list(): LocalWorkspace[] {
     return this.load().workspaces;
+  }
+
+  /** Records owned by `sub`. */
+  listFor(sub: string): LocalWorkspace[] {
+    return this.list().filter((w) => w.sub === sub);
   }
 
   get(id: string): LocalWorkspace | undefined {
@@ -168,32 +182,33 @@ export class LocalRegistry {
 
   /** Fresh limit from the backend when reachable (and cache it); else the cached
    * last-known value; else DEFAULT_MAX_LOCAL. Never throws on a network failure. */
-  async resolveLimit(): Promise<number> {
+  async resolveLimit(sub: string): Promise<number> {
     const f = this.load();
     if (this.deps.fetchMaxLocal) {
       try {
-        const v = await this.deps.fetchMaxLocal();
+        const v = await this.deps.fetchMaxLocal(sub);
         if (typeof v === "number" && Number.isFinite(v) && v >= 0) {
-          this.save({ ...f, cachedMaxLocal: v });
+          this.save({ ...f, cachedMaxLocalBySub: { ...f.cachedMaxLocalBySub, [sub]: v } });
           return v;
         }
       } catch {
         /* offline / backend down: fall through to the cache */
       }
     }
-    return f.cachedMaxLocal ?? DEFAULT_MAX_LOCAL;
+    return f.cachedMaxLocalBySub?.[sub] ?? DEFAULT_MAX_LOCAL;
   }
 
-  /** Throws LocalLimitReachedError when the registry already holds `limit` workspaces. */
-  async assertCanCreate(): Promise<void> {
-    const limit = await this.resolveLimit();
-    const count = this.list().length;
+  /** Throws LocalLimitReachedError when `sub` already owns `limit` workspaces. */
+  async assertCanCreate(sub: string): Promise<void> {
+    const limit = await this.resolveLimit(sub);
+    const count = this.listFor(sub).length;
     if (count >= limit) throw new LocalLimitReachedError(limit, count);
   }
 
   /** Cap check, then ports + id, persisted. Client-side cap (bypassable, accepted by the owner). */
-  async create(name: string): Promise<LocalWorkspace> {
-    await this.assertCanCreate();
+  async create(sub: string, name: string): Promise<LocalWorkspace> {
+    if (!sub) throw new Error("sub is required to create a local workspace");
+    await this.assertCanCreate(sub);
     const f = this.load();
     const taken = new Set<number>();
     for (const w of f.workspaces) {
@@ -207,6 +222,7 @@ export class LocalRegistry {
     const ws: LocalWorkspace = {
       id,
       name: name.trim() || id,
+      sub,
       uiPort,
       apiPort,
       createdAt: this.now().toISOString(),
