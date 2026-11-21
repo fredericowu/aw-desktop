@@ -90,6 +90,23 @@ export function Picker({ state }: { state: AuthState }) {
         <span className="dim">Choose one to open, or create a new one.</span>
       </div>
 
+      {state.storageWarning && (
+        <div className="card picker-block" data-testid="storage-warning">
+          <span className="dim">{state.storageWarning}</span>
+        </div>
+      )}
+
+      {state.openError && (
+        <div className="card picker-block" data-testid="open-error" role="alert">
+          <span className="error">
+            Could not open {state.openError.slug}: {state.openError.message}
+          </span>
+          <button className="secondary" data-testid="open-retry" onClick={() => void window.aw.pickWorkspace(state.openError!.slug)}>
+            Retry
+          </button>
+        </div>
+      )}
+
       {load.phase === "loading" && (
         <div className="picker-loading">
           <div className="spinner" />

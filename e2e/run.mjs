@@ -21,7 +21,9 @@ const app = await electron.launch({
 // raises on first save of the token; it blocks the main process forever. Stub it for the harness only.
 // APEX carries a port in this harness; Chromium rejects a cookie Domain with a port, so session.cookies.set rejects (prod apex has no port).
 await app.evaluate(({ session }) => { const c = session.defaultSession.cookies; c.set = async () => {}; c.remove = async () => {}; });
-await app.evaluate(({ safeStorage }) => { safeStorage.encryptString = (s) => Buffer.from(s); safeStorage.decryptString = (b) => b.toString(); safeStorage.isEncryptionAvailable = () => true; });
+// Keychain FAILURE path (v0.1.8): encryptString throws -> sign-in must still complete (in memory) with a visible warning.
+await app.evaluate(({ safeStorage }) => { safeStorage.encryptString = () => { throw new Error("keychain denied"); }; safeStorage.decryptString = (b) => b.toString(); safeStorage.isEncryptionAvailable = () => true; });
+const restoreKeychain = () => app.evaluate(({ safeStorage }) => { safeStorage.encryptString = (s) => Buffer.from(s); });
 const authPage = async () => { for (let i = 0; i < 50; i++) { const w = app.windows().find((x) => !x.url().includes(".workspace.")); if (w) return w; await new Promise((r) => setTimeout(r, 200)); } throw new Error("no auth window"); };
 const snap = async (page, name) => {
   const p = join(shots, name + ".png"); await page.screenshot({ path: p }); console.log("SHOT", p);
@@ -53,6 +55,9 @@ await snap(page, "03-google-waiting");
 await app.evaluate(({ app }) => app.emit("open-url", { preventDefault() {} }, "awdesktop://auth?code=e2e-code"));
 await page.waitForSelector('[data-testid="local-block"]', { timeout: 15000 }).catch(async (e) => { await snap(page, "03b-google-callback-failed"); throw e; });
 rec("google: awdesktop://auth callback exchanged, landed on picker", true);
+rec("keychain failure: sign-in completed with visible warning (no hang)", await page.locator('[data-testid="storage-warning"]').isVisible(), (await page.locator('[data-testid="storage-warning"]').innerText().catch(() => "")).slice(0, 140));
+await snap(page, "03c-keychain-warning");
+await restoreKeychain();
 
 // landing
 await snap(page, "04-landing-local-cloud");
@@ -82,7 +87,25 @@ if (await recheck.count()) { await recheck.first().click(); await page.waitForTi
 else rec("wizard: Re-check button visible (runtime missing only)", true, "not shown: runtime already ready or host linked");
 await page.getByRole("button", { name: /Cancel|Back|Close/ }).first().click().catch(() => {});
 
-// Switch Workspace (Cmd+Shift+W menu item): open the shell, then switch back
+// Workspace-open FAILURE path (v0.1.8): cookie write rejects -> picker shows error + Retry, not stuck on "Opening your workspace...".
+await page.waitForTimeout(500);
+await app.evaluate(({ session }) => { session.defaultSession.cookies.set = async () => { throw new Error("e2e: cookie rejected"); }; });
+await page.getByRole("button", { name: /mock-cloud/ }).first().click();
+await page.waitForSelector('[data-testid="open-error"]', { timeout: 10000 }).catch(() => {});
+const oe = page.locator('[data-testid="open-error"]');
+rec("open failure: picker shows error + Retry (not stuck)", (await oe.count()) > 0 && (await page.locator('[data-testid="open-retry"]').isVisible()), (await oe.innerText().catch(() => "")).replace(/\s+/g, " ").slice(0, 140));
+await snap(page, "08a-open-failure");
+rec("open failure: no shell window opened", !app.windows().some((x) => x.url().includes(".workspace.")));
+await app.evaluate(({ session }) => { session.defaultSession.cookies.set = async () => {}; });
+await page.locator('[data-testid="open-retry"]').click().catch(() => {});
+await page.waitForTimeout(4000);
+rec("open failure: Retry opens the workspace shell", app.windows().some((x) => x.url().includes(".workspace.")));
+// Switch Workspace (Cmd+Shift+W menu item): back to the picker
+const shell0 = app.windows().find((x) => x.url().includes(".workspace."));
+if (shell0) await snap(shell0, "08b-shell-after-retry");
+await menu("Switch Workspace");
+await page.waitForTimeout(2000);
+// Switch Workspace again: open the shell from a clean picker
 await page.waitForTimeout(500);
 await page.getByRole("button", { name: /mock-cloud/ }).first().click().catch((e) => console.log("row click failed", String(e).slice(0, 120)));
 await page.waitForTimeout(4000);

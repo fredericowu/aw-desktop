@@ -76,6 +76,10 @@ export interface AuthState {
   user: AwUser | null;
   error: string | null;
   apex: string;
+  /** Last failed workspace open; the picker shows it with a Retry. */
+  openError?: { slug: string; message: string } | null;
+  /** Session could not be persisted to the Keychain (in-memory only). */
+  storageWarning?: string | null;
 }
 
 export interface SessionResult {

@@ -298,3 +298,23 @@ describe("guided create", () => {
     await screen.findByText("You've hit your free-tier limit");
   });
 });
+
+describe("Picker open failure", () => {
+  afterEach(() => cleanup());
+
+  it("shows the error with a Retry that re-opens the same workspace", async () => {
+    const b = bridge();
+    (window as unknown as { aw: unknown }).aw = b;
+    const failed: AuthState = { ...state, openError: { slug: "acme", message: "Failed to set cookie" } };
+    render(<Picker state={failed} />);
+    expect(screen.getByTestId("open-error").textContent).toContain("Failed to set cookie");
+    fireEvent.click(screen.getByTestId("open-retry"));
+    expect(b.pickWorkspace).toHaveBeenCalledWith("acme");
+  });
+
+  it("shows a storage warning when the Keychain save failed", () => {
+    (window as unknown as { aw: unknown }).aw = bridge();
+    render(<Picker state={{ ...state, storageWarning: "Could not save your session" }} />);
+    expect(screen.getByTestId("storage-warning").textContent).toContain("Could not save");
+  });
+});

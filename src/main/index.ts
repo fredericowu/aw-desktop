@@ -9,6 +9,7 @@ import { injectIdentityCookie, clearIdentityCookie } from "./cookie";
 import { registerProtocolHandler, startGoogleSignInHandoff } from "./oauth";
 import { createAuthWindow, createShellWindow } from "./windows";
 import { checkForUpdates } from "./updater";
+import { guardedOpen, persistSessionSafely } from "./safeOpen";
 import { probeRuntimes } from "./runtimeProbe";
 import { openIfCurrent, SessionScope, type SessionHandle, SetupSlot, scopedExclusive, killActiveBootstrap, preflightFor, readHostStatus, realHostOps, runBootstrapFlow } from "./localBootstrap";
 import { decidePreflight, fail, startProgress } from "./bootstrapCore";
@@ -33,7 +34,7 @@ const setupSlot = new SetupSlot();
 /** A setup job belongs to the sign-in session that started it. */
 const sessionScope = new SessionScope();
 
-let state: AuthState = { stage: "splash", user: null, error: null, apex: APEX };
+let state: AuthState = { stage: "splash", user: null, error: null, apex: APEX, openError: null, storageWarning: null };
 
 /** macOS keeps the app alive after the picker window is closed, leaving
  * `authWindow` pointing at a destroyed window: every send/hide must go through this. */
@@ -67,20 +68,33 @@ function routeAfterAuth(user: AwUser): void {
   setState({ stage: "picker", user, error: null });
 }
 
-async function openWorkspace(slug: string, isCurrent: () => boolean = () => true): Promise<void> {
-  if (!currentToken) return teardownToLogin("session_lost");
+async function openWorkspace(slug: string, isCurrent: () => boolean = () => true): Promise<boolean> {
+  if (!currentToken) {
+    teardownToLogin("session_lost");
+    return false;
+  }
   const token = currentToken;
-  setState({ stage: "loading-workspace", error: null });
-  await openIfCurrent(
-    isCurrent,
-    () => injectIdentityCookie(token),
-    () => {
-      liveAuthWindow()?.hide();
-      shellWindow = createShellWindow(workspaceUrl(slug));
-      watchForSessionExpiry(shellWindow);
+  setState({ stage: "loading-workspace", error: null, openError: null });
+  return guardedOpen(
+    slug,
+    () =>
+      openIfCurrent(
+        isCurrent,
+        () => injectIdentityCookie(token),
+        () => {
+          liveAuthWindow()?.hide();
+          shellWindow = createShellWindow(workspaceUrl(slug));
+          watchForSessionExpiry(shellWindow);
+        },
+        // Signed out while the cookie was being written: don't leave it behind.
+        () => void clearIdentityCookie().catch(() => undefined),
+      ),
+    // A cookie/window failure must not strand the picker on "Opening your workspace...".
+    (openError) => {
+      if (!isCurrent() || !currentToken) return;
+      liveAuthWindow()?.show();
+      setState({ stage: "picker", openError });
     },
-    // Signed out while the cookie was being written: don't leave it behind.
-    () => void clearIdentityCookie().catch(() => undefined),
   );
 }
 
@@ -126,7 +140,7 @@ async function refreshLoop(): Promise<void> {
   try {
     const { token, user } = await api.refresh(currentToken);
     currentToken = token;
-    saveToken(token);
+    persistSessionSafely(() => saveToken(token));
     if (shellWindow) await injectIdentityCookie(token);
     setState({ user });
   } catch (err) {
@@ -140,8 +154,8 @@ async function refreshLoop(): Promise<void> {
 
 function handleAuthSuccess(token: string, user: AwUser): { ok: true; user: AwUser } {
   currentToken = token;
-  saveToken(token);
-  setState({ user, error: null });
+  const storageWarning = persistSessionSafely(() => saveToken(token));
+  setState({ user, error: null, openError: null, storageWarning });
   routeAfterAuth(user);
   return { ok: true, user };
 }
@@ -274,8 +288,8 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle("aw:pickWorkspace", async (_e, slug: string) => {
-    await openWorkspace(slug);
-    return { ok: true };
+    const ok = await openWorkspace(slug);
+    return ok ? { ok: true } : { ok: false, error: state.openError?.message ?? "open_failed" };
   });
 
   ipcMain.handle("aw:listWorkspaces", async (): Promise<ApiResult<WorkspaceListData>> => {
