@@ -59,7 +59,7 @@ jobs:
         run: npm ci
 
       - name: Bundle workspace UI
-        # aw-workspace-ui is private; AW_UI_REPO_TOKEN needs read access to it.
+        # aw-workspace-ui is public; AW_UI_REPO_TOKEN is optional.
         env:
           AW_UI_REPO_TOKEN: ${{ secrets.AW_UI_REPO_TOKEN }}
         run: bash scripts/fetch-ui.sh
@@ -158,7 +158,7 @@ jobs:
         run: npm ci
 
       - name: Bundle workspace UI
-        # aw-workspace-ui is private; AW_UI_REPO_TOKEN needs read access to it.
+        # aw-workspace-ui is public; AW_UI_REPO_TOKEN is optional.
         env:
           AW_UI_REPO_TOKEN: ${{ secrets.AW_UI_REPO_TOKEN }}
         shell: bash
