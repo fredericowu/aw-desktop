@@ -18,7 +18,11 @@ const app = await electron.launch({
   env: { ...process.env, AW_DESKTOP_APEX: `127.0.0.1.nip.io:${port}`, NODE_TLS_REJECT_UNAUTHORIZED: "0" },
 });
 const authPage = async () => { for (let i = 0; i < 50; i++) { const w = app.windows().find((x) => !x.url().includes(".workspace.")); if (w) return w; await new Promise((r) => setTimeout(r, 200)); } throw new Error("no auth window"); };
-const snap = async (page, name) => { const p = join(shots, name + ".png"); await page.screenshot({ path: p }); console.log("SHOT", p); };
+const snap = async (page, name) => {
+  const p = join(shots, name + ".png"); await page.screenshot({ path: p }); console.log("SHOT", p);
+  const txt = await page.evaluate(() => document.body.innerText).catch(() => "");
+  writeFileSync(join(shots, name + ".txt"), txt); console.log("TEXT", name, JSON.stringify(txt.replace(/\s+/g, " ").slice(0, 300)));
+};
 const menu = (label) => app.evaluate(({ Menu }, l) => { const ws = Menu.getApplicationMenu().items.find((i) => i.label === "Workspace"); ws.submenu.items.find((i) => i.label.startsWith(l)).click(); return true; }, label);
 
 let page = await authPage();
@@ -42,7 +46,7 @@ const opened = await app.evaluate(() => globalThis.__opened);
 rec("google: system browser asked to open start URL (client=mac)", opened.length === 1 && opened[0].includes("/api/identity/google/start?client=mac"), opened[0] ?? "none");
 await snap(page, "03-google-waiting");
 await app.evaluate(({ app }) => app.emit("open-url", { preventDefault() {} }, "awdesktop://auth?code=e2e-code"));
-await page.waitForSelector('[data-testid="local-block"]', { timeout: 15000 });
+await page.waitForSelector('[data-testid="local-block"]', { timeout: 15000 }).catch(async (e) => { await snap(page, "03b-google-callback-failed"); throw e; });
 rec("google: awdesktop://auth callback exchanged, landed on picker", true);
 
 // landing
