@@ -183,19 +183,21 @@ export class LocalRegistry {
   /** Fresh limit from the backend when reachable (and cache it); else the cached
    * last-known value; else DEFAULT_MAX_LOCAL. Never throws on a network failure. */
   async resolveLimit(sub: string): Promise<number> {
-    const f = this.load();
     if (this.deps.fetchMaxLocal) {
       try {
         const v = await this.deps.fetchMaxLocal(sub);
         if (typeof v === "number" && Number.isFinite(v) && v >= 0) {
-          this.save({ ...f, cachedMaxLocalBySub: { ...f.cachedMaxLocalBySub, [sub]: v } });
+          // Re-read after the await: a pre-await snapshot would clobber concurrent
+          // refreshes (other subs) and intervening workspace edits.
+          const cur = this.load();
+          this.save({ ...cur, cachedMaxLocalBySub: { ...cur.cachedMaxLocalBySub, [sub]: v } });
           return v;
         }
       } catch {
         /* offline / backend down: fall through to the cache */
       }
     }
-    return f.cachedMaxLocalBySub?.[sub] ?? DEFAULT_MAX_LOCAL;
+    return this.load().cachedMaxLocalBySub?.[sub] ?? DEFAULT_MAX_LOCAL;
   }
 
   /** Throws LocalLimitReachedError when `sub` already owns `limit` workspaces. */
