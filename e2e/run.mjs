@@ -1,6 +1,6 @@
 // Drives the REAL packaged AW Desktop.app (Playwright _electron) against mock-backend.mjs.
 // Usage: NODE_TLS_REJECT_UNAUTHORIZED=0 node run.mjs <AW Desktop.app> <workdir> <port>
-// Never touches ~/.aw-remote-host: it only reads host status. Does NOT click "Create".
+// Never touches the live workspace or any host tooling. Does NOT click "Create".
 import { _electron as electron } from "playwright-core";
 import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -75,18 +75,17 @@ rec("cloud: forced click makes no POST /api/workspaces", before === after, `${be
 await snap(page, "05-cloud-disabled");
 
 // Dependencies screen. The live Mac is linked, so the harness stubs the MAIN-process IPC handlers
-// (no shipped test hook): getLocalHost -> unlinked, depsList/depsInstall -> a scripted state machine.
+// (no shipped test hook): depsList/depsInstall -> a scripted state machine.
 // Nothing is installed and Create is never clicked.
 await app.evaluate(({ ipcMain }) => {
-  const st = { host: "missing", podman: "missing", progress: 0, installs: [] };
+  const st = { podman: "missing", progress: 0, installs: [] };
   globalThis.__deps = st;
   const plan = (id) => ({ source: "https://example.invalid/" + id, size: "1.0 MB", checksum: "sha256 e2e", dest: "~/e2e", needsAdmin: false });
   const item = (id, title, state, extra = {}) => ({ id, title, sub: "", required: id !== "machine", state, plan: state === "installed" || id === "machine" ? undefined : plan(id), ...extra });
-  ipcMain.removeHandler("aw:getLocalHost"); ipcMain.handle("aw:getLocalHost", () => ({ binary: false, linked: false }));
   ipcMain.removeHandler("aw:depsList");
   ipcMain.handle("aw:depsList", () => ({ platform: "darwin", supported: true,
-    items: [item("host", "aw-remote-host", st.host, st.host === "installing" ? { progress: st.progress } : {}), item("podman", "Podman", st.podman), item("machine", "Podman machine", "missing")],
-    ready: st.host === "installed" && st.podman === "installed" }));
+    items: [item("podman", "Podman", st.podman, st.podman === "installing" ? { progress: st.progress } : {}), item("machine", "Podman machine", "missing")],
+    ready: st.podman === "installed" }));
   ipcMain.removeHandler("aw:depsInstall");
   ipcMain.handle("aw:depsInstall", (_e, id, approved) => { st.installs.push([id, approved]); if (approved) { st[id] = "installing"; st.progress = 40; } return { ok: true }; });
 });
@@ -95,16 +94,16 @@ await page.waitForSelector('[data-testid="deps"]', { timeout: 20000 });
 await snap(page, "06-deps-missing");
 const stateOf = (id) => page.locator(`[data-testid="dep-${id}"]`).getAttribute("data-state");
 const cont = page.locator('[data-testid="deps-continue"]');
-rec("deps: host + podman listed as missing, Continue disabled", (await stateOf("host")) === "missing" && (await stateOf("podman")) === "missing" && (await cont.isDisabled()));
+rec("deps: podman listed as missing, no host row, Continue disabled", (await stateOf("podman")) === "missing" && (await page.locator('[data-testid="dep-host"]').count()) === 0 && (await cont.isDisabled()));
 const planTxt = await page.locator('[data-testid="dep-podman-plan"]').innerText();
 rec("deps: plan shows URL, size, checksum before any install", /example\.invalid\/podman/.test(planTxt) && /1\.0 MB/.test(planTxt) && /sha256/.test(planTxt), planTxt.replace(/\s+/g, " "));
 rec("deps: nothing installed without a click", (await app.evaluate(() => globalThis.__deps.installs.length)) === 0);
-await page.locator('[data-testid="dep-host-install"]').click();
-await page.waitForFunction(() => document.querySelector('[data-testid="dep-host"]')?.getAttribute("data-state") === "installing", null, { timeout: 8000 });
-rec("deps: click -> installing with progress (approved=true sent)", JSON.stringify(await app.evaluate(() => globalThis.__deps.installs)) === JSON.stringify([["host", true]]) && /40%/.test(await page.locator('[data-testid="dep-host-state"]').innerText()));
+await page.locator('[data-testid="dep-podman-install"]').click();
+await page.waitForFunction(() => document.querySelector('[data-testid="dep-podman"]')?.getAttribute("data-state") === "installing", null, { timeout: 8000 });
+rec("deps: click -> installing with progress (approved=true sent)", JSON.stringify(await app.evaluate(() => globalThis.__deps.installs)) === JSON.stringify([["podman", true]]) && /40%/.test(await page.locator('[data-testid="dep-podman-state"]').innerText()));
 await snap(page, "07-deps-installing");
-await app.evaluate(() => { globalThis.__deps.host = "installed"; globalThis.__deps.podman = "installed"; });
-await page.waitForFunction(() => document.querySelector('[data-testid="dep-host"]')?.getAttribute("data-state") === "installed", null, { timeout: 10000 });
+await app.evaluate(() => { globalThis.__deps.podman = "installed"; });
+await page.waitForFunction(() => document.querySelector('[data-testid="dep-podman"]')?.getAttribute("data-state") === "installed", null, { timeout: 10000 });
 rec("deps: flips to installed on its own (3s poll, no click)", true);
 await page.waitForFunction(() => !document.querySelector('[data-testid="deps-continue"]').disabled, null, { timeout: 8000 });
 rec("deps: Continue enabled only when all required are installed", true);
