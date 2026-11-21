@@ -214,4 +214,17 @@ describe("reconcilePorts", () => {
     const r = new LocalRegistry({ store: s, isPortFree: freeExcept([ws.apiPort]) });
     expect((await r.reconcilePorts(ws.id, (p) => p === ws.apiPort)).apiChanged).toBe(false);
   });
+  it("concurrent reconciles of two workspaces persist four distinct ports", async () => {
+    const s = memStore();
+    const base = mk(s, { fetchMaxLocal: async () => 5 });
+    const a = await base.create("A", "a");
+    const b = await base.create("A", "b");
+    const busy = [a.uiPort, b.uiPort];
+    const isPortFree = async (p: number) => (await Promise.resolve(), !busy.includes(p));
+    const r1 = new LocalRegistry({ store: s, isPortFree });
+    const r2 = new LocalRegistry({ store: s, isPortFree });
+    await Promise.all([r1.reconcilePorts(a.id), r2.reconcilePorts(b.id)]);
+    const all = r1.list().flatMap((w) => [w.uiPort, w.apiPort]);
+    expect(new Set(all).size).toBe(4);
+  });
 });

@@ -256,21 +256,33 @@ export class LocalRegistry {
     id: string,
     heldByUs: (port: number) => boolean = () => false,
   ): Promise<{ workspace: LocalWorkspace; uiChanged: boolean; apiChanged: boolean }> {
-    const f = this.load();
-    const cur = f.workspaces.find((w) => w.id === id);
-    if (!cur) throw new Error(`unknown local workspace ${id}`);
-    const others = new Set<number>();
-    for (const w of f.workspaces) if (w.id !== id) (others.add(w.uiPort), others.add(w.apiPort));
-    const ok = async (p: number, extra: number[]) =>
-      p !== RESERVED_PORT && !others.has(p) && !extra.includes(p) && (heldByUs(p) || (await this.isPortFree(p)));
-    let { uiPort, apiPort } = cur;
-    if (!(await ok(uiPort, []))) uiPort = await findFreePort(this.isPortFree, new Set([...others, apiPort]));
-    if (!(await ok(apiPort, [uiPort]))) apiPort = await findFreePort(this.isPortFree, new Set([...others, uiPort]), uiPort + 1);
-    const workspace = { ...cur, uiPort, apiPort };
-    if (uiPort !== cur.uiPort || apiPort !== cur.apiPort) {
-      const latest = this.load(); // re-read: the probes above awaited
-      this.save({ ...latest, workspaces: latest.workspaces.map((w) => (w.id === id ? workspace : w)) });
+    // Probes are async: after them, re-read and revalidate the selection against the latest
+    // reservations (a concurrent reconcile may have persisted the same port); retry on conflict.
+    for (;;) {
+      const f = this.load();
+      const cur = f.workspaces.find((w) => w.id === id);
+      if (!cur) throw new Error(`unknown local workspace ${id}`);
+      const othersOf = (ws: LocalWorkspace[]) => {
+        const o = new Set<number>();
+        for (const w of ws) if (w.id !== id) (o.add(w.uiPort), o.add(w.apiPort));
+        return o;
+      };
+      const others = othersOf(f.workspaces);
+      const ok = async (p: number, extra: number[]) =>
+        p !== RESERVED_PORT && !others.has(p) && !extra.includes(p) && (heldByUs(p) || (await this.isPortFree(p)));
+      let { uiPort, apiPort } = cur;
+      if (!(await ok(uiPort, []))) uiPort = await findFreePort(this.isPortFree, new Set([...others, apiPort]));
+      if (!(await ok(apiPort, [uiPort]))) apiPort = await findFreePort(this.isPortFree, new Set([...others, uiPort]), uiPort + 1);
+      const workspace = { ...cur, uiPort, apiPort };
+      const changed = uiPort !== cur.uiPort || apiPort !== cur.apiPort;
+      if (changed) {
+        const latest = this.load(); // re-read: the probes above awaited
+        const taken = othersOf(latest.workspaces);
+        if (taken.has(uiPort) || taken.has(apiPort)) continue;
+        if (!latest.workspaces.some((w) => w.id === id)) throw new Error(`unknown local workspace ${id}`);
+        this.save({ ...latest, workspaces: latest.workspaces.map((w) => (w.id === id ? workspace : w)) });
+      }
+      return { workspace, uiChanged: uiPort !== cur.uiPort, apiChanged: apiPort !== cur.apiPort };
     }
-    return { workspace, uiChanged: uiPort !== cur.uiPort, apiChanged: apiPort !== cur.apiPort };
   }
 }
