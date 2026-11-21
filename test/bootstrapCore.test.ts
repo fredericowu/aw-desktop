@@ -122,6 +122,11 @@ describe("resume state machine (rowState)", () => {
   it("running + linked here => open-here", () => {
     expect(rowState(row({ status: "running" }), host({ linked: true, workspaceSlug: "w" }))).toBe("open-here");
   });
+  it("running with the same slug but a different host id => open-remote", () => {
+    const h = host({ linked: true, workspaceSlug: "w", remoteHostId: "rh_1" });
+    expect(rowState(row({ status: "running", remote_host_id: "rh_2" }), h)).toBe("open-remote");
+    expect(rowState(row({ status: "running", remote_host_id: "rh_1" }), h)).toBe("open-here");
+  });
   it("running elsewhere => open-remote", () => {
     expect(rowState(row({ status: "running" }), host({ linked: true, workspaceSlug: "x" }))).toBe("open-remote");
     expect(rowState(row({ status: "running" }), host({}))).toBe("open-remote");
