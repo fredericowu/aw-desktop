@@ -12,6 +12,7 @@ function ops(over: Partial<HostOps> = {}): HostOps {
       onLine("podman: installed and verified");
       return 0;
     }),
+    installerInFlight: () => false,
     killBootstrap: vi.fn(async () => undefined),
     ...over,
   };
@@ -305,32 +306,43 @@ describe("round 7 regressions", () => {
     return { marks, h: { lastLaunchedAt: () => at, markLaunched: (_s: string, t: number) => void marks.push(t), } };
   };
 
-  it("Retry within the grace window monitors the LaunchAgent instead of launching a second installer", async () => {
+  const MIN = 60 * 1000;
+
+  it("3 min after hand-off with an idle installer lock: Retry re-runs the bootstrap", async () => {
+    const o = linked();
+    const { h, marks } = handoff(1_000);
+    let n = 0;
+    const { d } = deps(o, { getRowHostId: async () => "r", handoff: h, now: () => 1_000 + 3 * MIN, getStatus: async () => (n++ === 0 ? "provisioning" : "running") });
+    const p = await runBootstrapFlow("w", d);
+    expect(o.runBootstrap).toHaveBeenCalledTimes(1);
+    expect(marks.length).toBe(1);
+    expect(p.phase).toBeDefined();
+  });
+
+  it("3 min after hand-off with a LIVE installer lock: monitor only, no second installer", async () => {
+    const o = ops({ runStatus: async () => "linked: yes (remote_host_id=r)\nworkspace: w", installerInFlight: () => true });
+    const { h } = handoff(1_000);
+    let status = "provisioning";
+    const { d } = deps(o, { getRowHostId: async () => "r", handoff: h, now: () => 1_000 + 3 * MIN, getStatus: vi.fn(async () => { const s = status; status = "running"; return s; }) });
+    const p = await runBootstrapFlow("w", d);
+    expect(p.phase).toBe("done");
+    expect(o.runBootstrap).not.toHaveBeenCalled();
+    expect(o.installBinary).not.toHaveBeenCalled();
+  });
+
+  it("inside the settle window (no lock yet) a Retry only monitors", async () => {
     const o = linked();
     const { h } = handoff(1_000);
     const { d } = deps(o, { getRowHostId: async () => "r", handoff: h, now: () => 2_000 });
     const p = await runBootstrapFlow("w", d);
     expect(p.phase).toBe("done");
     expect(o.runBootstrap).not.toHaveBeenCalled();
-    expect(o.installBinary).not.toHaveBeenCalled();
-    expect(p.lines.join("\n")).toContain("waiting for it to finish");
   });
 
-  it("after the grace window a Retry re-runs the bootstrap (agent may be dead) and records the launch", async () => {
-    const o = linked();
-    const { h, marks } = handoff(1_000);
-    const { d } = deps(o, { getRowHostId: async () => "r", handoff: h, now: () => 1_000 + 46 * 60 * 1000 });
-    const p = await runBootstrapFlow("w", d);
-    expect(p.phase).toBe("done");
-    expect(o.runBootstrap).toHaveBeenCalledTimes(1);
-    expect(marks.length).toBe(1);
-  });
-
-  it("Retry within the window on an error/stopped row fails clearly and never relaunches", async () => {
+  it("error/stopped row on a Mac that is NOT provisioned is refused, no CLI launch", async () => {
     for (const st of ["error", "stopped"]) {
       const o = linked();
-      const { h } = handoff(1_000);
-      const { d } = deps(o, { getRowHostId: async () => "r", handoff: h, now: () => 2_000, getStatus: async () => st });
+      const { d } = deps(o, { getRowHostId: async () => "r", handoff: handoff(null).h, getStatus: async () => st });
       const p = await runBootstrapFlow("w", d);
       expect(p.phase).toBe("failed");
       expect(p.error).toContain(st);
@@ -338,26 +350,74 @@ describe("round 7 regressions", () => {
     }
   });
 
-  it("after the hand-off window an error/stopped row is still refused, never relaunched", async () => {
+  it("error/stopped row on a Mac that reports provisioned: relaunch is allowed", async () => {
+    const o = ops({ runStatus: async () => "linked: yes (remote_host_id=r)\nworkspace: w\npodman: healthy\npostgres: healthy" });
+    let n = 0;
+    const { d } = deps(o, { getRowHostId: async () => "r", handoff: handoff(null).h, getStatus: async () => (n++ === 0 ? "stopped" : "running") });
+    const p = await runBootstrapFlow("w", d);
+    expect(o.runBootstrap).toHaveBeenCalledTimes(1);
+    expect(p.phase).toBe("done");
+  });
+
+  it("error/stopped row on a provisioned Mac with a LIVE installer lock never relaunches", async () => {
     for (const st of ["error", "stopped"]) {
-      const o = linked();
-      const { h } = handoff(1_000);
-      const { d } = deps(o, { getRowHostId: async () => "r", handoff: h, now: () => 1_000 + 46 * 60 * 1000, getStatus: async () => st });
+      const o = ops({ runStatus: async () => "linked: yes (remote_host_id=r)\nworkspace: w\npodman: healthy", installerInFlight: () => true });
+      const { d } = deps(o, { getRowHostId: async () => "r", handoff: handoff(null).h, getStatus: async () => st });
       const p = await runBootstrapFlow("w", d);
       expect(p.phase).toBe("failed");
+      expect(p.error).toContain("still running an install");
       expect(o.runBootstrap).not.toHaveBeenCalled();
     }
   });
 
-  it("a timed-out wait keeps the hand-off marker (no evidence the installer stopped)", async () => {
+  it("an unreadable resume row never relaunches", async () => {
     const o = linked();
-    const clear = vi.fn();
-    const { h } = handoff(1_000);
-    let t = 2_000;
-    const { d } = deps(o, { getRowHostId: async () => "r", handoff: { ...h, clear } as never, handoffGraceMs: 1e12, now: () => (t += 10_000_000), getStatus: async () => "provisioning" });
+    const { d } = deps(o, { getRowHostId: async () => "r", handoff: handoff(null).h, getStatus: async () => { throw new Error("net"); } });
     const p = await runBootstrapFlow("w", d);
     expect(p.phase).toBe("failed");
-    expect(clear).not.toHaveBeenCalled();
+    expect(o.runBootstrap).not.toHaveBeenCalled();
+  });
+
+  it("after the settle window, 90s continuously without an installer fails with Retry", async () => {
+    const o = linked();
+    let t = 1_000 + 3 * MIN;
+    const { h } = handoff(1_000);
+    // monitor-only is forced by a live lock at entry, then the lock vanishes
+    let calls = 0;
+    o.installerInFlight = () => calls++ === 0;
+    const { d } = deps(o, { getRowHostId: async () => "r", handoff: h, now: () => t, sleep: async () => void (t += 30_000), pollTimeoutMs: 60 * MIN, getStatus: async () => "provisioning" });
+    const p = await runBootstrapFlow("w", d);
+    expect(p.phase).toBe("failed");
+    expect(p.error).toContain("no longer running");
+    expect(o.runBootstrap).not.toHaveBeenCalled();
+  });
+
+  it("status API outage past the idle window does not fail the wait", async () => {
+    const o = linked();
+    let t = 1_000 + 3 * MIN;
+    let calls = 0;
+    o.installerInFlight = () => calls++ === 0;
+    let n = 0;
+    const { d } = deps(o, { getRowHostId: async () => "r", handoff: handoff(1_000).h, now: () => t, sleep: async () => void (t += 30_000), pollTimeoutMs: 60 * MIN, getStatus: async () => { n++; if (n === 1) return "provisioning"; if (n <= 7) throw new Error("net"); return "running"; } });
+    const p = await runBootstrapFlow("w", d);
+    expect(p.phase).toBe("done");
+  });
+
+  it("a row turning error mid-wait fails immediately", async () => {
+    const o = ops({ runStatus: async () => "linked: yes (remote_host_id=r)\nworkspace: w", installerInFlight: () => true });
+    let n = 0;
+    const { d } = deps(o, { getRowHostId: async () => "r", handoff: handoff(1_000).h, now: () => 1_000 + 3 * MIN, getStatus: async () => (n++ < 2 ? "provisioning" : "error") });
+    const p = await runBootstrapFlow("w", d);
+    expect(p.phase).toBe("failed");
+    expect(p.error).toContain("error");
+  });
+
+  it("a timed-out wait fails without relaunching", async () => {
+    const o = ops({ runStatus: async () => "linked: yes (remote_host_id=r)\nworkspace: w", installerInFlight: () => true });
+    let t = 2_000;
+    const { d } = deps(o, { getRowHostId: async () => "r", handoff: handoff(1_000).h, now: () => (t += 10_000_000), getStatus: async () => "provisioning" });
+    const p = await runBootstrapFlow("w", d);
+    expect(p.phase).toBe("failed");
     expect(o.runBootstrap).not.toHaveBeenCalled();
   });
 

@@ -169,3 +169,41 @@ describe("progress", () => {
     expect(complete(p).phase).toBe("done");
   });
 });
+
+import { lockInFlight, HOST_VERB_BOUND_MS } from "../src/main/bootstrapCore";
+describe("lockInFlight", () => {
+  const now = 10_000_000_000;
+  const rec = (pid: number, ageMs: number) => JSON.stringify({ verb: "bootstrap", pid, started_at: (now - ageMs) / 1000 });
+  it("missing or blank => false", () => {
+    expect(lockInFlight(null, null, now, () => true)).toBe(false);
+    expect(lockInFlight("  \n", 1, now, () => true)).toBe(false);
+  });
+  it("live pid, fresh => true; dead pid => false; too old => false", () => {
+    expect(lockInFlight(rec(7, 1000), now, now, () => true)).toBe(true);
+    expect(lockInFlight(rec(7, 1000), now, now, () => false)).toBe(false);
+    expect(lockInFlight(rec(7, HOST_VERB_BOUND_MS + 1), now, now, () => true)).toBe(false);
+  });
+  it("unparseable fails safe on mtime", () => {
+    expect(lockInFlight("verb=bootstrap", now - 1000, now, () => false)).toBe(true);
+    expect(lockInFlight("verb=bootstrap", now - HOST_VERB_BOUND_MS - 1, now, () => false)).toBe(false);
+  });
+});
+
+describe("lockInFlight blank file + kernel probe", () => {
+  const now = 10_000_000_000;
+  it("blank + held/unknown => in flight; blank + free => idle", () => {
+    expect(lockInFlight("", now, now, () => true, () => "held")).toBe(true);
+    expect(lockInFlight("", now, now, () => true, () => "unknown")).toBe(true);
+    expect(lockInFlight("", now, now, () => true, () => "free")).toBe(false);
+  });
+});
+
+describe("parseStatus provisioned (pinned v0.1.150 output)", () => {
+  it("module health lines => provisioned", () => {
+    const out = "2026/11/21 linked: yes (remote_host_id=r)\nworkspace: w\npodman: healthy\npostgres: not healthy\nx";
+    expect(parseStatus(out).provisioned).toBe(true);
+  });
+  it("lean link prints provisioned: no", () => {
+    expect(parseStatus("linked: yes (remote_host_id=r)\nworkspace: w\nprovisioned: no (lean link)").provisioned).toBe(false);
+  });
+});

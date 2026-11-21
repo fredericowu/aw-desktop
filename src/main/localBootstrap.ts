@@ -1,5 +1,5 @@
-import { execFile, spawn } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFile, spawn, spawnSync } from "node:child_process";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BootstrapProgress, LocalHostStatus } from "../shared/types";
@@ -11,6 +11,7 @@ import {
   complete,
   decidePreflight,
   fail,
+  lockInFlight,
   parseStatus,
   releaseUrl,
   startProgress,
@@ -29,6 +30,8 @@ export interface HostOps {
   installBinary(onLine: (l: string) => void): Promise<string>;
   /** Runs bootstrap-workspace; resolves the exit code. Token is passed via argv only. */
   runBootstrap(binary: string, token: string | null, controlPlane: string | undefined, onLine: (l: string) => void): Promise<number | null>;
+  /** True while the host's own lifecycle lock shows a background install running. */
+  installerInFlight(): boolean;
   /** Stops the bootstrap child AND its descendants (installer scripts, curl), resolving once they are gone. */
   killBootstrap(): Promise<void>;
 }
@@ -65,13 +68,19 @@ export interface FlowDeps {
    * provisioning inside the LaunchAgent, so a second CLI run within the grace
    * window would race it (same container name). */
   handoff?: { lastLaunchedAt(slug: string): number | null; markLaunched(slug: string, at: number): void };
-  handoffGraceMs?: number;
+  /** Gap between the CLI detaching and the agent taking the host lock. */
+  handoffSettleMs?: number;
+  /** Continuous no-installer time (past the settle window) after which a still-provisioning row fails. */
+  idleFailMs?: number;
 }
 
 /** Row statuses (aw-backend) meaning provisioning ended without a running workspace. */
 const DEAD_STATUSES = new Set(["error", "stopped"]);
 
-export const HANDOFF_GRACE_MS = 45 * 60 * 1000;
+/** Only covers the gap between the CLI detaching and the LaunchAgent taking the
+ * host lifecycle lock; afterwards the lock itself says whether an installer runs. */
+export const HANDOFF_SETTLE_MS = 2 * 60 * 1000;
+export const IDLE_FAIL_MS = 90 * 1000;
 
 const POLL_INTERVAL_MS = 5000;
 const POLL_TIMEOUT_MS = 20 * 60 * 1000;
@@ -108,22 +117,32 @@ export async function runBootstrapFlow(slug: string, deps: FlowDeps): Promise<Bo
     const pre = await preflightFor(host, slug, deps.getRowHostId);
     if (pre.action === "block") throw new Error(pre.message);
 
-    // Retry/Finish while a previous run's LaunchAgent may still be provisioning:
-    // keep monitoring instead of launching a second installer.
+    // Retry/Finish on a linked Mac. The background install runs in the LaunchAgent
+    // under the host lifecycle lock, so that lock (not a timer) says whether a
+    // second installer would overlap a live one.
+    const settleMs = deps.handoffSettleMs ?? HANDOFF_SETTLE_MS;
     const last = deps.handoff?.lastLaunchedAt(slug) ?? null;
-    let monitorOnly = !pre.needsToken && last !== null && deps.now() - last < (deps.handoffGraceMs ?? HANDOFF_GRACE_MS);
-    // Wait-only. If the control plane already reports the row error/stopped, do NOT
-    // relaunch: on reconnect aw-backend only provisions rows still "provisioning" and
-    // marks any other row running without starting its container, so a relaunch would
-    // open a workspace that never came up. Fail clearly instead.
-    // Applies to ANY linked-host resume (inside or after the hand-off window).
+    let monitorOnly = false;
     if (!pre.needsToken) {
       const seen = await pollOnce(deps, slug, 30_000);
+      if (seen === "") {
+        throw new Error("Could not read this workspace's status from the control plane, so setup was not resumed. Check your connection and Retry.");
+      }
       if (DEAD_STATUSES.has(seen)) {
-        throw new Error(`The control plane reports this workspace as "${seen}". Setup can't be resumed from here (a reconnect would mark it running without provisioning it). Delete the workspace and create it again.`);
+        // aw-backend marks a non-provisioning row running on reconnect without
+        // installing anything, so only relaunch when this Mac really is provisioned.
+        if (host.provisioned !== true) {
+          throw new Error(`The control plane reports this workspace as "${seen}" and this Mac has no completed workspace install, so setup can't be resumed from here.`);
+        }
+        // The CLI runs infra setup outside the host's lifecycle lock: never overlap a live install.
+        if (deps.ops.installerInFlight()) {
+          throw new Error(`The control plane reports this workspace as "${seen}" while this Mac's background service is still running an install. Wait for it to finish, then Retry.`);
+        }
+      } else {
+        monitorOnly = (last !== null && deps.now() - last < settleMs) || deps.ops.installerInFlight();
       }
     }
-    if (monitorOnly) line("Setup was already handed to this Mac's background service; waiting for it to finish instead of starting another install.");
+    if (monitorOnly) line("Setup is already running on this Mac's background service; waiting for it to finish instead of starting another install.");
 
     let binary = host.binary ? deps.ops.findBinary() : null;
     if (!binary && !monitorOnly) binary = await deps.ops.installBinary(line);
@@ -147,10 +166,25 @@ export async function runBootstrapFlow(slug: string, deps: FlowDeps): Promise<Bo
     push(advance(p, "running"));
     const interval = deps.pollIntervalMs ?? POLL_INTERVAL_MS;
     const deadline = deps.now() + (deps.pollTimeoutMs ?? POLL_TIMEOUT_MS);
+    const launchedAt = deps.handoff?.lastLaunchedAt(slug) ?? last;
+    const settleEnd = launchedAt === null ? Number.NEGATIVE_INFINITY : launchedAt + settleMs;
+    let idleSince: number | null = null;
     for (;;) {
       if (deps.signal?.aborted) throw new Error("cancelled");
       const status = await pollOnce(deps, slug, deadline - deps.now());
       if (status === "running") break;
+      if (DEAD_STATUSES.has(status)) throw new Error(`The control plane now reports this workspace as "${status}". Retry to try again.`);
+      const now = deps.now();
+      if (now >= settleEnd) {
+        // Only a confirmed "provisioning" row may count down: a status API hiccup ("") is not evidence of failure.
+        if (status !== "provisioning" || deps.ops.installerInFlight()) idleSince = null;
+        else {
+          idleSince ??= now;
+          if (now - idleSince >= (deps.idleFailMs ?? IDLE_FAIL_MS)) {
+            throw new Error("The background install is no longer running but the workspace is not up yet. Retry to continue.");
+          }
+        }
+      }
       if (deps.now() > deadline) {
         // Keep the hand-off: a timeout is not evidence the background installer stopped.
         throw new Error(`workspace did not reach running (last status: ${status || "unknown"})`);
@@ -454,8 +488,40 @@ export function realHostOps(): HostOps {
         child.on("close", (code) => resolve(code));
         activeChild = child;
       }),
+    installerInFlight: () => {
+      const file = join(homedir(), ".aw-remote-host", "workspace-lifecycle.lock");
+      try {
+        const content = readFileSync(file, "utf8");
+        return lockInFlight(content, statSync(file).mtimeMs, Date.now(), pidAlive, () => probeLock(file));
+      } catch {
+        return false;
+      }
+    },
     killBootstrap: killActiveBootstrap,
   };
+}
+
+/** Non-blocking flock probe of the host's lifecycle lock (aw-remote-host takes
+ * LOCK_EX|LOCK_NB on this file). macOS ships /usr/bin/perl; exit 0 = we got the
+ * lock (free), 1 = held, anything else (no perl, error) = unknown. */
+function probeLock(file: string): "held" | "free" | "unknown" {
+  const r = spawnSync(
+    "/usr/bin/perl",
+    ["-e", 'use Fcntl qw(:flock); open(my $f, "<", $ARGV[0]) or exit 2; exit(flock($f, LOCK_SH|LOCK_NB) ? 0 : 1);', file],
+    { timeout: 5000 },
+  );
+  if (r.status === 0) return "free";
+  if (r.status === 1) return "held";
+  return "unknown";
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
 }
 
 let activeChild: ReturnType<typeof spawn> | null = null;
