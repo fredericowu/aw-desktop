@@ -302,7 +302,7 @@ describe("round 7 regressions", () => {
   const linked = () => ops({ runStatus: async () => "linked: yes (remote_host_id=r)\nworkspace: w" });
   const handoff = (at: number | null) => {
     const marks: number[] = [];
-    return { marks, h: { lastLaunchedAt: () => at, markLaunched: (_s: string, t: number) => void marks.push(t) } };
+    return { marks, h: { lastLaunchedAt: () => at, markLaunched: (_s: string, t: number) => void marks.push(t), } };
   };
 
   it("Retry within the grace window monitors the LaunchAgent instead of launching a second installer", async () => {
@@ -324,6 +324,41 @@ describe("round 7 regressions", () => {
     expect(p.phase).toBe("done");
     expect(o.runBootstrap).toHaveBeenCalledTimes(1);
     expect(marks.length).toBe(1);
+  });
+
+  it("Retry within the window on an error/stopped row fails clearly and never relaunches", async () => {
+    for (const st of ["error", "stopped"]) {
+      const o = linked();
+      const { h } = handoff(1_000);
+      const { d } = deps(o, { getRowHostId: async () => "r", handoff: h, now: () => 2_000, getStatus: async () => st });
+      const p = await runBootstrapFlow("w", d);
+      expect(p.phase).toBe("failed");
+      expect(p.error).toContain(st);
+      expect(o.runBootstrap).not.toHaveBeenCalled();
+    }
+  });
+
+  it("after the hand-off window an error/stopped row is still refused, never relaunched", async () => {
+    for (const st of ["error", "stopped"]) {
+      const o = linked();
+      const { h } = handoff(1_000);
+      const { d } = deps(o, { getRowHostId: async () => "r", handoff: h, now: () => 1_000 + 46 * 60 * 1000, getStatus: async () => st });
+      const p = await runBootstrapFlow("w", d);
+      expect(p.phase).toBe("failed");
+      expect(o.runBootstrap).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a timed-out wait keeps the hand-off marker (no evidence the installer stopped)", async () => {
+    const o = linked();
+    const clear = vi.fn();
+    const { h } = handoff(1_000);
+    let t = 2_000;
+    const { d } = deps(o, { getRowHostId: async () => "r", handoff: { ...h, clear } as never, handoffGraceMs: 1e12, now: () => (t += 10_000_000), getStatus: async () => "provisioning" });
+    const p = await runBootstrapFlow("w", d);
+    expect(p.phase).toBe("failed");
+    expect(clear).not.toHaveBeenCalled();
+    expect(o.runBootstrap).not.toHaveBeenCalled();
   });
 
   it("a first run records the hand-off only after the CLI exited 0", async () => {

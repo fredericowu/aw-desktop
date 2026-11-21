@@ -35,7 +35,9 @@ export type RowState = "open-here" | "open-remote" | "finish" | "blocked";
 
 /** Resume state machine for a LOCAL row against this Mac. */
 export function rowState(ws: WorkspaceInfo, host: LocalHostStatus | null): RowState {
-  const here = !!host && host.linked && !host.unknown && host.workspaceSlug === ws.name;
+  const here = !!host && host.linked && !host.unknown && host.workspaceSlug === ws.name &&
+    // Same slug on another control plane / host is NOT this Mac's workspace.
+    !!host.remoteHostId && ws.remote_host_id === host.remoteHostId;
   if (ws.status === "running") return here ? "open-here" : "open-remote";
   if (!host) return "finish";
   return decidePreflight(host, ws.name, ws.remote_host_id).action === "block" ? "blocked" : "finish";
