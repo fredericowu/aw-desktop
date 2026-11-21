@@ -22,6 +22,8 @@ export interface WorkspaceInfo {
   status: string;
   /** Host this row is bound to once the control plane registered it. */
   remote_host_id?: string | null;
+  /** Local (desktop-managed) rows only: the name the user typed (`name` is the registry id). */
+  display_name?: string;
 }
 
 /** GET /api/accounts/me — limits + local_count are added by aw-backend's
@@ -103,11 +105,10 @@ export interface AwBridge {
   pickWorkspace(slug: string): Promise<{ ok: boolean; error?: string }>;
   listWorkspaces(): Promise<ApiResult<WorkspaceListData>>;
   checkRuntime(): Promise<RuntimeCheck>;
-  /** Pre-flight + create the row + start the bootstrap. Blocked (code
-   * `already_linked`) BEFORE anything is created when this Mac already hosts a workspace. */
+  /** Cap check (main process) + register a standalone local workspace + bring it up.
+   * 402 `plan_limit_local_workspaces` when the signed-in user is at the cap. */
   createLocalWorkspace(name: string): Promise<ApiResult<WorkspaceInfo>>;
-  getLocalHost(): Promise<LocalHostStatus>;
-  /** Resume / retry a row that exists but never came up. Never creates a row. */
+  /** Start (or resume / retry) an existing local workspace and open it. Never creates one. */
   finishLocalSetup(slug: string): Promise<ApiResult<null>>;
   getBootstrapProgress(): Promise<BootstrapProgress | null>;
   onBootstrapProgress(cb: (p: BootstrapProgress) => void): () => void;
@@ -119,19 +120,7 @@ export interface AwBridge {
   onStateChanged(cb: (state: AuthState) => void): () => void;
 }
 
-/** What `aw-remote-host status` (plus the credentials file) says about THIS
- * Mac. `unknown` = we could not tell (binary missing but credentials exist,
- * or status output unparseable) and is treated as "linked" by the guard. */
-export interface LocalHostStatus {
-  binary: boolean;
-  linked: boolean;
-  unknown?: boolean;
-  remoteHostId?: string;
-  workspaceSlug?: string;
-  provisioned?: boolean;
-}
-
-export type BootstrapStepId = "cli" | "token" | "link" | "podman" | "postgres" | "redis" | "workspace" | "running";
+export type BootstrapStepId = "machine" | "image" | "postgres" | "redis" | "workspace" | "running";
 
 export interface BootstrapProgress {
   slug: string;

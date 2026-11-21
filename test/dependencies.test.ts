@@ -3,13 +3,12 @@ import { createHash } from "node:crypto";
 import { DepInstaller, PODMAN_PKG_SHA256, buildSnapshot, plansFor, verifySha256, type DepProbe, type InstallOps } from "../src/main/dependencies";
 
 const mac = { platform: "darwin", arch: "arm64" };
-const none: DepProbe = { hostBinary: false, podman: false, machineRunning: false };
+const none: DepProbe = { podman: false };
 
 function mk(ops: Partial<InstallOps> = {}) {
   const persisted: Array<string | null> = [];
   const changes = vi.fn();
   const full: InstallOps = {
-    installHost: vi.fn(async (_l, p) => p(100)),
     download: vi.fn(async (_u, p) => { p(50); return new Uint8Array([1, 2, 3]); }),
     unpackPodmanPkg: vi.fn(async () => undefined),
     ...ops,
@@ -21,18 +20,18 @@ function mk(ops: Partial<InstallOps> = {}) {
 describe("buildSnapshot", () => {
   it("all missing: not ready; machine is optional", () => {
     const s = buildSnapshot(mac, none, {});
-    expect(s.items.map((i) => [i.id, i.state])).toEqual([["host", "missing"], ["podman", "missing"], ["machine", "missing"]]);
+    expect(s.items.map((i) => [i.id, i.state])).toEqual([["podman", "missing"], ["machine", "missing"]]);
     expect(s.ready).toBe(false);
     expect(s.items.find((i) => i.id === "machine")!.required).toBe(false);
   });
   it("ready only when every REQUIRED item is installed (machine not needed)", () => {
-    expect(buildSnapshot(mac, { hostBinary: true, podman: true, machineRunning: false }, {}).ready).toBe(true);
-    expect(buildSnapshot(mac, { hostBinary: true, podman: false, machineRunning: true }, {}).ready).toBe(false);
+    expect(buildSnapshot(mac, { podman: true }, {}).ready).toBe(true);
+    expect(buildSnapshot(mac, { podman: false }, {}).ready).toBe(false);
   });
   it("probe wins over a stale live state; live state shows while not installed", () => {
     const live = { podman: { state: "installing" as const, progress: 30 } };
-    expect(buildSnapshot(mac, none, live).items[1]).toMatchObject({ state: "installing", progress: 30 });
-    expect(buildSnapshot(mac, { ...none, podman: true }, live).items[1].state).toBe("installed");
+    expect(buildSnapshot(mac, none, live).items[0]).toMatchObject({ state: "installing", progress: 30 });
+    expect(buildSnapshot(mac, { ...none, podman: true }, live).items[0].state).toBe("installed");
   });
   it("shows url, size and checksum before any install (plan), and pins the podman sha", () => {
     const p = plansFor(mac).podman!;
@@ -89,27 +88,42 @@ describe("DepInstaller", () => {
   });
   it("installing reports progress then single-flights a second install", async () => {
     let release!: () => void;
-    const { inst, changes } = mk({ installHost: vi.fn((_l, p) => new Promise<void>((r) => { p(40); release = r; })) });
-    const first = inst.install("host", true, none);
-    expect(inst.live.host).toMatchObject({ state: "installing", progress: 40 });
-    expect(await inst.install("podman", true, none)).toMatchObject({ ok: false, error: expect.stringMatching(/running/) });
-    release();
-    expect(await first).toEqual({ ok: true });
-    expect(inst.active).toBeNull();
-    expect(changes).toHaveBeenCalled();
+    const { inst, changes } = mk({
+      download: vi.fn((_u, p) => new Promise<Uint8Array>((r) => { p(40); release = () => r(new Uint8Array([1])); })),
+      unpackPodmanPkg: vi.fn(async () => undefined),
+    });
+    const orig = PODMAN_PKG_SHA256.arm64;
+    PODMAN_PKG_SHA256.arm64 = createHash("sha256").update(new Uint8Array([1])).digest("hex");
+    try {
+      const first = inst.install("podman", true, none);
+      expect(inst.live.podman).toMatchObject({ state: "installing", progress: 40 });
+      expect(await inst.install("podman", true, none)).toMatchObject({ ok: false, error: expect.stringMatching(/running/) });
+      release();
+      expect(await first).toEqual({ ok: true });
+      expect(inst.active).toBeNull();
+      expect(changes).toHaveBeenCalled();
+    } finally {
+      PODMAN_PKG_SHA256.arm64 = orig;
+    }
   });
   it("a failed install can be retried (failed -> installing -> installed)", async () => {
-    const installHost = vi.fn().mockRejectedValueOnce(new Error("network")).mockResolvedValueOnce(undefined);
-    const { inst } = mk({ installHost });
-    expect((await inst.install("host", true, none)).ok).toBe(false);
-    expect(inst.live.host).toMatchObject({ state: "failed", error: "network" });
-    expect(await inst.install("host", true, none)).toEqual({ ok: true });
-    expect(inst.live.host).toBeUndefined();
+    const download = vi.fn().mockRejectedValueOnce(new Error("network")).mockResolvedValueOnce(new Uint8Array([1]));
+    const { inst } = mk({ download });
+    const orig = PODMAN_PKG_SHA256.arm64;
+    PODMAN_PKG_SHA256.arm64 = createHash("sha256").update(new Uint8Array([1])).digest("hex");
+    try {
+      expect((await inst.install("podman", true, none)).ok).toBe(false);
+      expect(inst.live.podman).toMatchObject({ state: "failed", error: "network" });
+      expect(await inst.install("podman", true, none)).toEqual({ ok: true });
+      expect(inst.live.podman).toBeUndefined();
+    } finally {
+      PODMAN_PKG_SHA256.arm64 = orig;
+    }
   });
-  it("already installed: no-op; machine and unsupported platforms: no plan", async () => {
+  it("already installed: no-op; machine has no plan", async () => {
     const { inst, full } = mk();
-    expect(await inst.install("host", true, { ...none, hostBinary: true })).toEqual({ ok: true });
-    expect(full.installHost).not.toHaveBeenCalled();
+    expect(await inst.install("podman", true, { podman: true })).toEqual({ ok: true });
+    expect(full.download).not.toHaveBeenCalled();
     expect((await inst.install("machine", true, none)).ok).toBe(false);
   });
 });

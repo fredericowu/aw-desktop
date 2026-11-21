@@ -1,18 +1,11 @@
 import type { WorkspaceInfo } from "./types";
 
-/** Local = a BYOD workspace (remote-host placement) that WE do not host.
- * A hosted workspace's placement_driver also flips to "remote-host" once its
- * outer host links, so `is_hosted` is the discriminator (aw-backend
- * is_hosted_workspace), never the driver alone. Everything else is Cloud. */
-export function isLocal(ws: Pick<WorkspaceInfo, "placement_driver" | "is_hosted">): boolean {
-  return ws.placement_driver === "remote-host" && !ws.is_hosted;
-}
+/** Placement of a workspace that lives in aw-desktop's own registry: standalone, on this Mac,
+ * no row in aw-backend. Everything else (including old BYOD remote-host rows) is listed as cloud-side. */
+export const LOCAL_PLACEMENT = "desktop-local";
 
-/** A local workspace whose row exists but nothing has brought it up on this
- * Mac yet. Phase 1 creates rows without bootstrapping, so these are shown as
- * "Setup pending on this Mac" and are not openable. */
-export function isSetupPending(ws: WorkspaceInfo): boolean {
-  return isLocal(ws) && ws.status !== "running";
+export function isLocal(ws: Pick<WorkspaceInfo, "placement_driver">): boolean {
+  return ws.placement_driver === LOCAL_PLACEMENT;
 }
 
 export function splitWorkspaces(list: WorkspaceInfo[]): { local: WorkspaceInfo[]; cloud: WorkspaceInfo[] } {

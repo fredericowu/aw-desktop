@@ -26,3 +26,23 @@ export async function injectIdentityCookie(token: string): Promise<void> {
 export async function clearIdentityCookie(): Promise<void> {
   await electronSession.defaultSession.cookies.remove(`https://${COOKIE_DOMAIN}/`, COOKIE_NAME);
 }
+
+/** Local (standalone) workspaces are served from http://127.0.0.1:<uiPort>, a different origin
+ * from the apex, so the identity JWT needs its own host-only cookie there. The front server
+ * only passes it through; it never adds credentials itself. */
+export async function injectLocalIdentityCookie(token: string, uiPort: number): Promise<void> {
+  await electronSession.defaultSession.cookies.set({
+    url: `http://127.0.0.1:${uiPort}/`,
+    name: COOKIE_NAME,
+    value: token,
+    path: "/",
+    secure: false,
+    httpOnly: true,
+    sameSite: "lax",
+    expirationDate: Date.now() / 1000 + 365 * 24 * 3600,
+  });
+}
+
+export async function clearLocalIdentityCookies(ports: number[]): Promise<void> {
+  await Promise.all(ports.map((p) => electronSession.defaultSession.cookies.remove(`http://127.0.0.1:${p}/`, COOKIE_NAME)));
+}

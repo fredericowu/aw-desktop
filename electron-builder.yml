@@ -5,6 +5,11 @@ directories:
   buildResources: build
 files:
   - out/**/*
+# Bundled workspace UI build served by the loopback front server (see src/main/localWorkspaces.ts uiStaticDir).
+# Populated at release time from aw-workspace-ui; absent in dev (use AW_DESKTOP_UI_DIR).
+extraResources:
+  - from: resources/ui
+    to: ui
 protocols:
   name: AW Desktop
   schemes:

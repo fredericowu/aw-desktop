@@ -5,10 +5,9 @@ import type {
   ApiResult,
   AuthState,
   BootstrapProgress,
-  LocalHostStatus,
   WorkspaceInfo,
 } from "../../shared/types";
-import { STEP_LABEL, STEP_ORDER, rowState } from "../../shared/bootstrapState";
+import { STEP_LABEL, STEP_ORDER } from "../../shared/bootstrapState";
 import {
   DEFAULT_LOCAL_LIMIT,
   isPlanLimitCode,
@@ -20,7 +19,7 @@ const CLOUD_UNAVAILABLE = "Feature is not available at this time.";
 type Load =
   | { phase: "loading" }
   | { phase: "error"; message: string }
-  | { phase: "ready"; workspaces: WorkspaceInfo[]; account: AccountInfo | null; host: LocalHostStatus | null };
+  | { phase: "ready"; workspaces: WorkspaceInfo[]; account: AccountInfo | null };
 
 type Modal =
   | null
@@ -42,12 +41,9 @@ export function Picker({ state }: { state: AuthState }) {
 
   const refresh = useCallback(async () => {
     setLoad({ phase: "loading" });
-    const [res, host] = await Promise.all([
-      window.aw.listWorkspaces(),
-      window.aw.getLocalHost().catch(() => null),
-    ]);
+    const res = await window.aw.listWorkspaces();
     if (res.ok && res.data) {
-      setLoad({ phase: "ready", workspaces: res.data.workspaces, account: res.data.account, host });
+      setLoad({ phase: "ready", workspaces: res.data.workspaces, account: res.data.account });
     } else {
       setLoad({ phase: "error", message: res.error ?? "Could not load your sandboxes." });
     }
@@ -143,7 +139,6 @@ export function Picker({ state }: { state: AuthState }) {
                   <WorkspaceRow
                     key={ws.name}
                     ws={ws}
-                    host={ready.host}
                     onFinish={async () => {
                       setNotice(null);
                       const r = await window.aw.finishLocalSetup(ws.name);
@@ -172,7 +167,7 @@ export function Picker({ state }: { state: AuthState }) {
             ) : (
               <div className="workspace-list">
                 {cloud.map((ws) => (
-                  <WorkspaceRow key={ws.name} ws={ws} host={null} onFinish={() => undefined} cloud />
+                  <WorkspaceRow key={ws.name} ws={ws} onFinish={() => undefined} cloud />
                 ))}
               </div>
             )}
@@ -222,56 +217,37 @@ export function Picker({ state }: { state: AuthState }) {
 
 function WorkspaceRow({
   ws,
-  host,
   onFinish,
   cloud,
 }: {
   ws: WorkspaceInfo;
-  host: LocalHostStatus | null;
   onFinish: () => void;
   cloud?: boolean;
 }) {
   const open = (
     <button className="secondary" onClick={() => window.aw.pickWorkspace(ws.name)}>
-      {ws.name}
+      {ws.display_name ?? ws.name}
     </button>
   );
   if (cloud) return open;
-  switch (rowState(ws, host)) {
-    case "open-here":
-      return (
-        <div className="workspace-row" data-testid={`here-${ws.name}`}>
-          {open}
-          <span className="dim">Runs on this Mac</span>
-        </div>
-      );
-    case "open-remote":
-      return (
-        <div className="workspace-row" data-testid={`remote-${ws.name}`}>
-          {open}
-          <span className="dim">Runs on another machine</span>
-        </div>
-      );
-    case "blocked":
-      return (
-        <div className="workspace-row pending" data-testid={`pending-${ws.name}`}>
-          <span>{ws.name}</span>
-          <span className="dim">
-            Setup pending. This Mac already hosts another workspace, so it can't be set up here.
-          </span>
-        </div>
-      );
-    default:
-      return (
-        <div className="workspace-row pending" data-testid={`pending-${ws.name}`}>
-          <span>{ws.name}</span>
-          <span className="dim">Setup pending on this Mac</span>
-          <button className="primary" onClick={onFinish}>
-            Finish setup
-          </button>
-        </div>
-      );
+  const label = ws.display_name ?? ws.name;
+  if (ws.status === "running") {
+    return (
+      <div className="workspace-row" data-testid={`here-${ws.name}`}>
+        {open}
+        <span className="dim">Runs on this Mac</span>
+      </div>
+    );
   }
+  return (
+    <div className="workspace-row pending" data-testid={`pending-${ws.name}`}>
+      <span>{label}</span>
+      <span className="dim">Not running. Starts a small VM on this Mac.</span>
+      <button className="primary" onClick={onFinish}>
+        Start
+      </button>
+    </div>
+  );
 }
 
 function ProgressModal({
@@ -362,28 +338,12 @@ function CreateWizard({
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [blocked, setBlocked] = useState<string | null>(null);
-
-  // Already-linked guard, shown up front (the main process re-checks on create).
-  useEffect(() => {
-    void window.aw.getLocalHost().then((h) => {
-      if (h.linked) {
-        setBlocked(
-          h.unknown
-            ? "This Mac already has aw-remote-host state we could not read, so we can't tell whether it hosts a workspace. Nothing will be created."
-            : `This Mac already hosts a workspace${h.workspaceSlug ? ` ("${h.workspaceSlug}")` : ""}. A Mac can run only one full local workspace. Nothing will be created.`,
-        );
-      }
-    }).catch(() => undefined);
-  }, []);
-
   async function create() {
     setBusy(true);
     setError(null);
     const res: ApiResult<WorkspaceInfo> = await window.aw.createLocalWorkspace(name.trim());
     setBusy(false);
     if (res.ok) return onCreated();
-    if (res.code === "already_linked") return setBlocked(res.error ?? "This Mac already hosts a workspace.");
     if (res.status === 402 && isPlanLimitCode(res.code)) return onLimit(res.limit);
     setError(res.error ?? "Could not create the sandbox.");
   }
@@ -391,12 +351,7 @@ function CreateWizard({
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
       <div className="card modal">
-        {blocked ? (
-          <>
-            <strong>This Mac can't host another workspace</strong>
-            <span className="error" data-testid="already-linked">{blocked}</span>
-          </>
-        ) : step === "runtime" ? (
+        {step === "runtime" ? (
           <>
             <span className="dim">Step 1 of 2 — Dependencies</span>
             <strong>Set up what your sandbox needs</strong>
