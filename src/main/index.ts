@@ -176,6 +176,15 @@ const handoffStore = {
   lastLaunchedAt(slug: string): number | null {
     return this.read()[slug] ?? null;
   },
+  clear(slug: string): void {
+    try {
+      const m = this.read();
+      delete m[slug];
+      writeFileSync(this.file(), JSON.stringify(m));
+    } catch {
+      // best effort
+    }
+  },
   markLaunched(slug: string, at: number): void {
     try {
       writeFileSync(this.file(), JSON.stringify({ ...this.read(), [slug]: at }));

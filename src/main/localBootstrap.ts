@@ -64,9 +64,12 @@ export interface FlowDeps {
   /** Records when the CLI last detached for a slug. The control plane then keeps
    * provisioning inside the LaunchAgent, so a second CLI run within the grace
    * window would race it (same container name). */
-  handoff?: { lastLaunchedAt(slug: string): number | null; markLaunched(slug: string, at: number): void };
+  handoff?: { lastLaunchedAt(slug: string): number | null; markLaunched(slug: string, at: number): void; clear?(slug: string): void };
   handoffGraceMs?: number;
 }
+
+/** Row statuses (aw-backend) meaning the background install is not progressing. */
+const DEAD_STATUSES = new Set(["error", "stopped"]);
 
 export const HANDOFF_GRACE_MS = 45 * 60 * 1000;
 
@@ -108,7 +111,17 @@ export async function runBootstrapFlow(slug: string, deps: FlowDeps): Promise<Bo
     // Retry/Finish while a previous run's LaunchAgent may still be provisioning:
     // keep monitoring instead of launching a second installer.
     const last = deps.handoff?.lastLaunchedAt(slug) ?? null;
-    const monitorOnly = !pre.needsToken && last !== null && deps.now() - last < (deps.handoffGraceMs ?? HANDOFF_GRACE_MS);
+    let monitorOnly = !pre.needsToken && last !== null && deps.now() - last < (deps.handoffGraceMs ?? HANDOFF_GRACE_MS);
+    // Wait-only is for a HEALTHY installer. If the control plane already reports the
+    // row failed/stopped, the background bootstrap is dead: Retry must re-run
+    // bootstrap-workspace (it reinstalls the service, which reconnects).
+    if (monitorOnly) {
+      const seen = await pollOnce(deps, slug, 30_000);
+      if (DEAD_STATUSES.has(seen)) {
+        monitorOnly = false;
+        deps.handoff?.clear?.(slug);
+      }
+    }
     if (monitorOnly) line("Setup was already handed to this Mac's background service; waiting for it to finish instead of starting another install.");
 
     let binary = host.binary ? deps.ops.findBinary() : null;
@@ -137,7 +150,11 @@ export async function runBootstrapFlow(slug: string, deps: FlowDeps): Promise<Bo
       if (deps.signal?.aborted) throw new Error("cancelled");
       const status = await pollOnce(deps, slug, deadline - deps.now());
       if (status === "running") break;
-      if (deps.now() > deadline) throw new Error(`workspace did not reach running (last status: ${status || "unknown"})`);
+      if (deps.now() > deadline) {
+        // A timed-out wait is not a healthy installer: let the next Retry re-run bootstrap.
+        deps.handoff?.clear?.(slug);
+        throw new Error(`workspace did not reach running (last status: ${status || "unknown"})`);
+      }
       await deps.sleep(interval);
     }
     push(complete(p));

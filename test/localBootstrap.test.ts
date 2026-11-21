@@ -302,7 +302,8 @@ describe("round 7 regressions", () => {
   const linked = () => ops({ runStatus: async () => "linked: yes (remote_host_id=r)\nworkspace: w" });
   const handoff = (at: number | null) => {
     const marks: number[] = [];
-    return { marks, h: { lastLaunchedAt: () => at, markLaunched: (_s: string, t: number) => void marks.push(t) } };
+    const cleared: string[] = [];
+    return { marks, cleared, h: { lastLaunchedAt: () => at, markLaunched: (_s: string, t: number) => void marks.push(t), clear: (s: string) => void cleared.push(s) } };
   };
 
   it("Retry within the grace window monitors the LaunchAgent instead of launching a second installer", async () => {
@@ -324,6 +325,27 @@ describe("round 7 regressions", () => {
     expect(p.phase).toBe("done");
     expect(o.runBootstrap).toHaveBeenCalledTimes(1);
     expect(marks.length).toBe(1);
+  });
+
+  it("Retry within the window re-runs bootstrap when the row is already error/stopped (dead background install)", async () => {
+    const o = linked();
+    const { h, cleared } = handoff(1_000);
+    let n = 0;
+    const { d } = deps(o, { getRowHostId: async () => "r", handoff: h, now: () => 2_000, getStatus: async () => (n++ === 0 ? "error" : "running") });
+    const p = await runBootstrapFlow("w", d);
+    expect(p.phase).toBe("done");
+    expect(o.runBootstrap).toHaveBeenCalledTimes(1);
+    expect(cleared).toEqual(["w"]);
+  });
+
+  it("a timed-out wait clears the hand-off so the next Retry re-runs bootstrap", async () => {
+    const o = linked();
+    const { h, cleared } = handoff(1_000);
+    let t = 2_000;
+    const { d } = deps(o, { getRowHostId: async () => "r", handoff: h, now: () => (t += 10_000_000), getStatus: async () => "provisioning" });
+    const p = await runBootstrapFlow("w", d);
+    expect(p.phase).toBe("failed");
+    expect(cleared).toEqual(["w"]);
   });
 
   it("a first run records the hand-off only after the CLI exited 0", async () => {

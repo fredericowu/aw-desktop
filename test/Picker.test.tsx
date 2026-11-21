@@ -110,8 +110,8 @@ describe("Picker landing", () => {
 
   it("marks the tile hosted on THIS Mac; other running local tiles read 'Runs on another machine'", async () => {
     bridge({
-      workspaces: [ws({ name: "here", status: "running" }), ws({ name: "away", status: "running" })],
-      getLocalHost: vi.fn(async () => ({ binary: true, linked: true, workspaceSlug: "here" })),
+      workspaces: [ws({ name: "here", status: "running", remote_host_id: "rh_1" }), ws({ name: "away", status: "running" })],
+      getLocalHost: vi.fn(async () => ({ binary: true, linked: true, workspaceSlug: "here", remoteHostId: "rh_1" })),
     });
     render(<Picker state={state} />);
     expect((await screen.findByTestId("here-here")).textContent).toContain("Runs on this Mac");

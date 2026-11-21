@@ -119,8 +119,12 @@ describe("partial registration (credential saved, slug write failed)", () => {
 });
 
 describe("resume state machine (rowState)", () => {
+  it("running with the same slug but a different host id => open-remote", () => {
+    expect(rowState(row({ status: "running", remote_host_id: "other" }), host({ linked: true, workspaceSlug: "w", remoteHostId: "rh_1" }))).toBe("open-remote");
+    expect(rowState(row({ status: "running", remote_host_id: null }), host({ linked: true, workspaceSlug: "w", remoteHostId: "rh_1" }))).toBe("open-remote");
+  });
   it("running + linked here => open-here", () => {
-    expect(rowState(row({ status: "running" }), host({ linked: true, workspaceSlug: "w" }))).toBe("open-here");
+    expect(rowState(row({ status: "running", remote_host_id: "rh_1" }), host({ linked: true, workspaceSlug: "w", remoteHostId: "rh_1" }))).toBe("open-here");
   });
   it("running elsewhere => open-remote", () => {
     expect(rowState(row({ status: "running" }), host({ linked: true, workspaceSlug: "x" }))).toBe("open-remote");
