@@ -2,6 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Picker } from "../src/renderer/screens/Picker";
+import type { DepId, DepsSnapshot, DepStatus } from "../src/shared/deps";
 import type { ApiResult, AuthState, AwBridge, BootstrapProgress, LocalHostStatus, RuntimeCheck, WorkspaceInfo, WorkspaceListData } from "../src/shared/types";
 
 const state: AuthState = { stage: "picker", user: null, error: null, apex: "aw.tekflox.com" };
@@ -14,6 +15,17 @@ const ws = (over: Partial<WorkspaceInfo>): WorkspaceInfo => ({
 });
 let emitProgress: (p: BootstrapProgress) => void = () => undefined;
 const none: RuntimeCheck = { runtimes: [], ready: false };
+const item = (id: DepId, state: DepStatus["state"], extra: Partial<DepStatus> = {}): DepStatus => ({
+  id, title: id, sub: "", required: id !== "machine", state,
+  plan: state === "installed" ? undefined : { source: "https://x/" + id, size: "1.0 MB", checksum: "sha256 abc", dest: "~/x", needsAdmin: false },
+  ...extra,
+});
+const snapOf = (host: DepStatus["state"], podman: DepStatus["state"], extra: Partial<DepsSnapshot> = {}): DepsSnapshot => ({
+  platform: "darwin", supported: true,
+  items: [item("host", host), item("podman", podman), item("machine", "missing", { plan: undefined })],
+  ready: host === "installed" && podman === "installed", ...extra,
+});
+const allReady = snapOf("installed", "installed");
 const found: RuntimeCheck = { runtimes: [{ kind: "podman", installed: true, running: true }], ready: true };
 
 function bridge(over: Partial<AwBridge> & { workspaces?: WorkspaceInfo[]; localCount?: number } = {}) {
@@ -29,6 +41,9 @@ function bridge(over: Partial<AwBridge> & { workspaces?: WorkspaceInfo[]; localC
       }),
     ),
     checkRuntime: vi.fn(async () => none),
+    depsList: vi.fn(async () => snapOf("missing", "missing")),
+    depsInstall: vi.fn(async () => ({ ok: true })),
+    onDepsChanged: vi.fn(() => () => undefined),
     createLocalWorkspace: vi.fn(async (name: string): Promise<ApiResult<WorkspaceInfo>> => ({ ok: true, data: ws({ name }) })),
     pickWorkspace: vi.fn(async () => ({ ok: true })),
     getLocalHost: vi.fn(async (): Promise<LocalHostStatus> => ({ binary: false, linked: false })),
@@ -67,7 +82,7 @@ describe("Picker landing", () => {
     expect(screen.getByTestId("cloud-caption").textContent).toContain("Feature is not available at this time");
     fireEvent.click(btn);
     expect(b.createLocalWorkspace).not.toHaveBeenCalled();
-    expect(b.checkRuntime).not.toHaveBeenCalled();
+    expect(b.depsList).not.toHaveBeenCalled();
   });
 
   it("a hosted membership shows under Cloud and opens normally", async () => {
@@ -169,7 +184,7 @@ describe("Picker landing", () => {
     const local = await screen.findByTestId("local-block");
     fireEvent.click(local.querySelector(":scope > button")!);
     await screen.findByText("You've hit your free-tier limit");
-    expect(b.checkRuntime).not.toHaveBeenCalled();
+    expect(b.depsList).not.toHaveBeenCalled();
     expect(b.createLocalWorkspace).not.toHaveBeenCalled();
   });
 });
@@ -186,21 +201,22 @@ describe("review fixes", () => {
     render(<Picker state={state} />);
     const local = await screen.findByTestId("local-block");
     fireEvent.click(local.querySelector(":scope > button")!);
-    await waitFor(() => expect(b.checkRuntime).toHaveBeenCalled());
+    await waitFor(() => expect(b.depsList).toHaveBeenCalled());
     expect(screen.queryByText("You've hit your free-tier limit")).toBeNull();
   });
 
   it("Cancel is disabled while a create request is pending", async () => {
     let release!: (r: ApiResult<WorkspaceInfo>) => void;
     const b = bridge({
-      checkRuntime: vi.fn(async () => found),
+      depsList: vi.fn(async () => allReady),
       createLocalWorkspace: vi.fn(() => new Promise<ApiResult<WorkspaceInfo>>((r) => (release = r))),
     });
     render(<Picker state={state} />);
     const local = await screen.findByTestId("local-block");
     fireEvent.click(local.querySelector(":scope > button")!);
-    await waitFor(() => expect(b.checkRuntime).toHaveBeenCalled());
-    fireEvent.click(await screen.findByText("Continue"));
+    await waitFor(() => expect(b.depsList).toHaveBeenCalled());
+    await waitFor(() => expect((screen.getByTestId("deps-continue") as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByTestId("deps-continue"));
     fireEvent.change(screen.getByPlaceholderText("my-sandbox"), { target: { value: "x" } });
     fireEvent.click(screen.getByText("Create sandbox"));
     await screen.findByText("Creating…");
@@ -214,41 +230,57 @@ describe("guided create", () => {
     render(<Picker state={state} />);
     const local = await screen.findByTestId("local-block");
     fireEvent.click(local.querySelector(":scope > button")!);
-    await waitFor(() => expect(b.checkRuntime).toHaveBeenCalled());
+    await waitFor(() => expect(b.depsList).toHaveBeenCalled());
   }
 
-  it("missing runtime shows install guidance and blocks Continue; Re-check does a real probe and flips to found", async () => {
+  it("lists every dependency; nothing installs until the user clicks, and the plan is shown first", async () => {
     const b = bridge();
     await openWizard(b);
-    await screen.findByText("Podman not ready");
-    // Honest copy: Docker Desktop alone is not sufficient.
-    expect(screen.getAllByText(/Podman command-line tool/).length).toBeGreaterThan(0);
-    expect(screen.getByText("Download Docker Desktop ↗")).toBeTruthy();
-    expect(screen.getByText("Download Podman ↗")).toBeTruthy();
-    expect(screen.queryByText("Continue")).toBeNull();
-    expect((screen.getByText("Install Podman for me") as HTMLButtonElement).disabled).toBe(false);
-
-    b.checkRuntime.mockResolvedValueOnce(found);
-    fireEvent.click(screen.getByText("I've installed it — Re-check"));
-    await screen.findByText("Found");
-    expect(b.checkRuntime).toHaveBeenCalledTimes(2);
-    expect((screen.getByText("Continue") as HTMLButtonElement).disabled).toBe(false);
+    await screen.findByTestId("dep-podman");
+    const plan = screen.getByTestId("dep-podman-plan").textContent ?? "";
+    expect(plan).toContain("https://x/podman");
+    expect(plan).toContain("1.0 MB");
+    expect(plan).toContain("sha256 abc");
+    expect(b.depsInstall).not.toHaveBeenCalled();
+    expect((screen.getByTestId("deps-continue") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByTestId("dep-podman-install"));
+    await waitFor(() => expect(b.depsInstall).toHaveBeenCalledWith("podman", true));
   });
 
-  it("Docker Desktop running without Podman is NOT treated as ready", async () => {
-    const dockerOnly: RuntimeCheck = { runtimes: [{ kind: "docker-desktop", installed: true, running: true }], ready: true };
-    const b = bridge({ checkRuntime: vi.fn(async () => dockerOnly) });
-    await openWizard(b);
-    await screen.findByText("Podman not ready");
-    expect(screen.queryByText("Continue")).toBeNull();
+  it("flips missing -> installing -> installed on its own and only then enables Continue", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const b = bridge();
+      await openWizard(b);
+      await screen.findByTestId("dep-host");
+      expect(screen.getByTestId("dep-host").getAttribute("data-state")).toBe("missing");
+      b.depsList.mockResolvedValue(snapOf("installing", "missing", { items: [item("host", "installing", { progress: 40 }), item("podman", "missing"), item("machine", "missing", { plan: undefined })] }));
+      await vi.advanceTimersByTimeAsync(3100);
+      await waitFor(() => expect(screen.getByTestId("dep-host").getAttribute("data-state")).toBe("installing"));
+      expect(screen.getByTestId("dep-host-state").textContent).toContain("40%");
+      b.depsList.mockResolvedValue(allReady);
+      await vi.advanceTimersByTimeAsync(3100);
+      await waitFor(() => expect(screen.getByTestId("dep-host").getAttribute("data-state")).toBe("installed"));
+      expect((screen.getByTestId("deps-continue") as HTMLButtonElement).disabled).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it("'Install Podman for me' proceeds to the name step", async () => {
-    const b = bridge();
+  it("a failed install shows the error and a Retry; Continue stays disabled", async () => {
+    const b = bridge({ depsList: vi.fn(async () => snapOf("installed", "failed", { items: [item("host", "installed"), item("podman", "failed", { error: "checksum mismatch" }), item("machine", "missing", { plan: undefined })], ready: false })) });
     await openWizard(b);
-    await screen.findByText("Podman not ready");
-    fireEvent.click(screen.getByText("Install Podman for me"));
-    await screen.findByLabelText("Sandbox name");
+    expect((await screen.findByTestId("dep-podman-error")).textContent).toContain("checksum mismatch");
+    expect(screen.getByText("Retry")).toBeTruthy();
+    expect((screen.getByTestId("deps-continue") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("an interrupted install is explained; an unsupported platform offers no install", async () => {
+    const b = bridge({ depsList: vi.fn(async () => ({ ...snapOf("missing", "missing"), supported: false, platform: "win32", interrupted: "podman" as DepId, items: [item("host", "missing", { plan: undefined }), item("podman", "missing", { plan: undefined })], ready: false })) });
+    await openWizard(b);
+    await screen.findByTestId("deps-interrupted");
+    expect(screen.getByTestId("deps-unsupported").textContent).toContain("untested");
+    expect(screen.queryByTestId("dep-host-install")).toBeNull();
   });
 
   it("an already-linked Mac is blocked up front with the explanation", async () => {
@@ -256,28 +288,28 @@ describe("guided create", () => {
     await openWizard(b);
     const msg = await screen.findByTestId("already-linked");
     expect(msg.textContent).toContain("fredericowu");
-    expect(screen.queryByText("Install Podman for me")).toBeNull();
+    expect(screen.queryByTestId("deps")).toBeNull();
     expect(b.createLocalWorkspace).not.toHaveBeenCalled();
   });
 
   it("an already_linked refusal from main shows the block, not a generic error", async () => {
     const b = bridge({
-      checkRuntime: vi.fn(async () => found),
+      depsList: vi.fn(async () => allReady),
       createLocalWorkspace: vi.fn(async () => ({ ok: false, code: "already_linked", error: "This Mac already hosts a workspace." })),
     });
     await openWizard(b);
-    await screen.findByText("Found");
-    fireEvent.click(screen.getByText("Continue"));
+    await waitFor(() => expect((screen.getByTestId("deps-continue") as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByTestId("deps-continue"));
     fireEvent.change(screen.getByLabelText("Sandbox name"), { target: { value: "x" } });
     fireEvent.click(screen.getByText("Create sandbox"));
     await screen.findByTestId("already-linked");
   });
 
   it("creates a remote-host workspace through the bridge with the typed name", async () => {
-    const b = bridge({ checkRuntime: vi.fn(async () => found) });
+    const b = bridge({ depsList: vi.fn(async () => allReady) });
     await openWizard(b);
-    await screen.findByText("Found");
-    fireEvent.click(screen.getByText("Continue"));
+    await waitFor(() => expect((screen.getByTestId("deps-continue") as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByTestId("deps-continue"));
     fireEvent.change(screen.getByLabelText("Sandbox name"), { target: { value: "  box1 " } });
     fireEvent.click(screen.getByText("Create sandbox"));
     await waitFor(() => expect(b.createLocalWorkspace).toHaveBeenCalledWith("box1"));
@@ -287,12 +319,12 @@ describe("guided create", () => {
 
   it.each(["plan_limit_local_workspaces", "plan_limit_workspaces"])("a 402 %s shows the limit modal", async (code) => {
     const b = bridge({
-      checkRuntime: vi.fn(async () => found),
+      depsList: vi.fn(async () => allReady),
       createLocalWorkspace: vi.fn(async () => ({ ok: false, status: 402, code, limit: 2, error: "cap" })),
     });
     await openWizard(b);
-    await screen.findByText("Found");
-    fireEvent.click(screen.getByText("Continue"));
+    await waitFor(() => expect((screen.getByTestId("deps-continue") as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByTestId("deps-continue"));
     fireEvent.change(screen.getByLabelText("Sandbox name"), { target: { value: "box3" } });
     fireEvent.click(screen.getByText("Create sandbox"));
     await screen.findByText("You've hit your free-tier limit");

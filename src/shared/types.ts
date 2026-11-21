@@ -1,3 +1,4 @@
+import type { DepId, DepsSnapshot } from "./deps";
 export interface AwUser {
   id: number;
   email: string;
@@ -110,6 +111,10 @@ export interface AwBridge {
   finishLocalSetup(slug: string): Promise<ApiResult<null>>;
   getBootstrapProgress(): Promise<BootstrapProgress | null>;
   onBootstrapProgress(cb: (p: BootstrapProgress) => void): () => void;
+  depsList(): Promise<DepsSnapshot>;
+  /** `approved` must be true: it is the user's explicit click on Install. */
+  depsInstall(id: DepId, approved: boolean): Promise<{ ok: boolean; error?: string }>;
+  onDepsChanged(cb: () => void): () => void;
   logout(): Promise<void>;
   onStateChanged(cb: (state: AuthState) => void): () => void;
 }

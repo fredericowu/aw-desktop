@@ -20,6 +20,13 @@ const bridge: AwBridge = {
     ipcRenderer.on("aw:bootstrap-progress", listener);
     return () => ipcRenderer.removeListener("aw:bootstrap-progress", listener);
   },
+  depsList: () => ipcRenderer.invoke("aw:depsList"),
+  depsInstall: (id, approved) => ipcRenderer.invoke("aw:depsInstall", id, approved),
+  onDepsChanged: (cb: () => void) => {
+    const listener = () => cb();
+    ipcRenderer.on("aw:deps-changed", listener);
+    return () => ipcRenderer.removeListener("aw:deps-changed", listener);
+  },
   logout: () => ipcRenderer.invoke("aw:logout"),
   onStateChanged: (cb: (state: AuthState) => void) => {
     const listener = (_event: unknown, next: AuthState) => cb(next);

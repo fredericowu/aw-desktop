@@ -11,6 +11,8 @@ import { createAuthWindow, createShellWindow } from "./windows";
 import { checkForUpdates } from "./updater";
 import { guardedOpen, persistSessionSafely } from "./safeOpen";
 import { probeRuntimes } from "./runtimeProbe";
+import { depsInstall, depsSnapshot, initDeps } from "./depsRuntime";
+import type { DepId } from "../shared/deps";
 import { openIfCurrent, SessionScope, type SessionHandle, SetupSlot, scopedExclusive, killActiveBootstrap, preflightFor, readHostStatus, realHostOps, runBootstrapFlow } from "./localBootstrap";
 import { decidePreflight, fail, startProgress } from "./bootstrapCore";
 import type { ApiResult, AuthState, AwUser, BootstrapProgress, WorkspaceInfo, WorkspaceListData } from "../shared/types";
@@ -309,6 +311,19 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle("aw:checkRuntime", () => probeRuntimes());
+
+  // Dependencies screen: probe is the source of truth; installs run only on an explicit approval.
+  initDeps(() => {
+    for (const w of BrowserWindow.getAllWindows()) {
+      try {
+        w.webContents.send("aw:deps-changed");
+      } catch {
+        // window gone
+      }
+    }
+  });
+  ipcMain.handle("aw:depsList", () => depsSnapshot());
+  ipcMain.handle("aw:depsInstall", (_e, id: DepId, approved: boolean) => depsInstall(id, approved === true));
 
   ipcMain.handle("aw:getLocalHost", () => readHostStatus(realHostOps()));
   ipcMain.handle("aw:getBootstrapProgress", () => bootstrapProgress);
