@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build the aw-workspace-ui SPA into resources/ui (bundled by electron-builder as
 # <resources>/ui and served by the local front server). aw-workspace-ui is PUBLIC,
-# so no credential is needed. AW_UI_REPO_TOKEN is optional (only for a private fork).
+# so no credential is needed; if AW_UI_REPO_TOKEN is set it is used (covers the repo
+# going private again).
 # Dev shortcut: AW_UI_SRC=/path/to/aw-workspace-ui (already checked out) skips the clone.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"

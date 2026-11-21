@@ -59,7 +59,9 @@ jobs:
         run: npm ci
 
       - name: Bundle workspace UI
-        # aw-workspace-ui is public: anonymous clone, no secret required.
+        # aw-workspace-ui is public; AW_UI_REPO_TOKEN is optional.
+        env:
+          AW_UI_REPO_TOKEN: ${{ secrets.AW_UI_REPO_TOKEN }}
         run: bash scripts/fetch-ui.sh
 
       - name: Typecheck + unit tests
@@ -156,7 +158,9 @@ jobs:
         run: npm ci
 
       - name: Bundle workspace UI
-        # aw-workspace-ui is public: anonymous clone, no secret required.
+        # aw-workspace-ui is public; AW_UI_REPO_TOKEN is optional.
+        env:
+          AW_UI_REPO_TOKEN: ${{ secrets.AW_UI_REPO_TOKEN }}
         shell: bash
         run: bash scripts/fetch-ui.sh
 
