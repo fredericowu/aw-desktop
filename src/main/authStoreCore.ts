@@ -72,23 +72,22 @@ export class AuthStore {
   /** Run one guarded safeStorage operation. Returns null on any failure. */
   private guarded<T>(op: (s: SafeStorageLike) => T): T | null {
     if (this.isDisabled()) return null;
-    const first = this.available === undefined;
-    if (first) {
-      try {
-        writeFileSync(this.attemptPath, String(Date.now()), { mode: 0o600 });
-      } catch {
-        this.inMemoryDisabled = true;
-        return null;
-      }
+    // The marker brackets EVERY safeStorage op, not just the first: a hang or
+    // kill during any later encrypt/decrypt must also disable it next launch.
+    try {
+      writeFileSync(this.attemptPath, String(Date.now()), { mode: 0o600 });
+    } catch {
+      this.inMemoryDisabled = true;
+      return null;
     }
     try {
       const s = this.storage();
-      if (first) {
+      if (this.available === undefined) {
         this.available = s.isEncryptionAvailable();
         if (!this.available) throw new Error("encryption unavailable");
       }
       const out = op(s);
-      if (first) { try { unlinkSync(this.attemptPath); } catch { /* ignore */ } }
+      try { unlinkSync(this.attemptPath); } catch { /* ignore */ }
       return out;
     } catch {
       this.disable();

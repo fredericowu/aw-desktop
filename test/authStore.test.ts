@@ -91,6 +91,40 @@ describe("AuthStore", () => {
     expect(existsSync(join(dir, "session.json"))).toBe(false);
   });
 
+  it("interruption during a LATER op (not the first) is skipped on next launch", () => {
+    const dir = mkdtempSync(join(tmpdir(), "awauth-"));
+    let n = 0;
+    const hang = (): never => { throw new Error("process died"); };
+    const s: SafeStorageLike = {
+      isEncryptionAvailable: () => true,
+      encryptString: (t) => (++n === 2 ? hang() : Buffer.from("enc:" + t)),
+      decryptString: (b) => b.toString().slice(4),
+    };
+    const store = new AuthStore(() => dir, () => s, () => undefined);
+    store.save("a"); // ok
+    // simulate the process being killed mid-op: marker written, never removed
+    writeFileSync(join(dir, "safestorage-attempt"), "1");
+    const { s: s2, fn: fn2 } = throwing();
+    const next = new AuthStore(() => dir, () => s2, () => undefined);
+    expect(next.load()).toBeNull();
+    expect(fn2).not.toHaveBeenCalled();
+  });
+
+  it("marker is written before and removed after every op", () => {
+    const dir = mkdtempSync(join(tmpdir(), "awauth-"));
+    const seen: boolean[] = [];
+    const s: SafeStorageLike = {
+      isEncryptionAvailable: () => true,
+      encryptString: (t) => { seen.push(existsSync(join(dir, "safestorage-attempt"))); return Buffer.from("enc:" + t); },
+      decryptString: (b) => b.toString().slice(4),
+    };
+    const store = new AuthStore(() => dir, () => s);
+    store.save("a");
+    store.save("b");
+    expect(seen).toEqual([true, true]);
+    expect(existsSync(join(dir, "safestorage-attempt"))).toBe(false);
+  });
+
   it("hanging safeStorage (attempt marker left behind) is skipped on next launch", () => {
     const { s, fn } = throwing();
     const { dir, store } = mk(s);
