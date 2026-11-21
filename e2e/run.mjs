@@ -74,17 +74,44 @@ const after = logLines().filter((l) => l.m === "POST" && l.u.startsWith("/api/wo
 rec("cloud: forced click makes no POST /api/workspaces", before === after, `${before}->${after}`);
 await snap(page, "05-cloud-disabled");
 
-// guided local wizard (runtime probe + Re-check); stops before any create
+// Dependencies screen. The live Mac is linked, so the harness stubs the MAIN-process IPC handlers
+// (no shipped test hook): getLocalHost -> unlinked, depsList/depsInstall -> a scripted state machine.
+// Nothing is installed and Create is never clicked.
+await app.evaluate(({ ipcMain }) => {
+  const st = { host: "missing", podman: "missing", progress: 0, installs: [] };
+  globalThis.__deps = st;
+  const plan = (id) => ({ source: "https://example.invalid/" + id, size: "1.0 MB", checksum: "sha256 e2e", dest: "~/e2e", needsAdmin: false });
+  const item = (id, title, state, extra = {}) => ({ id, title, sub: "", required: id !== "machine", state, plan: state === "installed" || id === "machine" ? undefined : plan(id), ...extra });
+  ipcMain.removeHandler("aw:getLocalHost"); ipcMain.handle("aw:getLocalHost", () => ({ binary: false, linked: false }));
+  ipcMain.removeHandler("aw:depsList");
+  ipcMain.handle("aw:depsList", () => ({ platform: "darwin", supported: true,
+    items: [item("host", "aw-remote-host", st.host, st.host === "installing" ? { progress: st.progress } : {}), item("podman", "Podman", st.podman), item("machine", "Podman machine", "missing")],
+    ready: st.host === "installed" && st.podman === "installed" }));
+  ipcMain.removeHandler("aw:depsInstall");
+  ipcMain.handle("aw:depsInstall", (_e, id, approved) => { st.installs.push([id, approved]); if (approved) { st[id] = "installing"; st.progress = 40; } return { ok: true }; });
+});
 await page.locator('[data-testid="local-block"]').getByRole("button", { name: /Create/ }).first().click();
-await page.waitForSelector('[data-testid="runtime-status"], [data-testid="already-linked"]', { timeout: 20000 });
-await snap(page, "06-wizard-runtime");
-const linked = await page.locator('[data-testid="already-linked"]').count();
-const dlg = async () => (await page.locator('[role="dialog"]').innerText().catch(() => "")).replace(/\s+/g, " ").slice(0, 600);
-console.log("DIALOG", JSON.stringify(await dlg()));
-rec("wizard: runtime probe rendered", (await page.locator('[data-testid="runtime-status"]').count()) > 0, "already-linked guard shown: " + (linked > 0));
-const recheck = page.getByRole("button", { name: /Re-check/ });
-if (await recheck.count()) { await recheck.first().click(); await page.waitForTimeout(2500); await snap(page, "07-wizard-recheck"); console.log("DIALOG2", JSON.stringify(await dlg())); rec("wizard: Re-check clicked", true); }
-else rec("wizard: Re-check button visible (runtime missing only)", true, "not shown: runtime already ready or host linked");
+await page.waitForSelector('[data-testid="deps"]', { timeout: 20000 });
+await snap(page, "06-deps-missing");
+const stateOf = (id) => page.locator(`[data-testid="dep-${id}"]`).getAttribute("data-state");
+const cont = page.locator('[data-testid="deps-continue"]');
+rec("deps: host + podman listed as missing, Continue disabled", (await stateOf("host")) === "missing" && (await stateOf("podman")) === "missing" && (await cont.isDisabled()));
+const planTxt = await page.locator('[data-testid="dep-podman-plan"]').innerText();
+rec("deps: plan shows URL, size, checksum before any install", /example\.invalid\/podman/.test(planTxt) && /1\.0 MB/.test(planTxt) && /sha256/.test(planTxt), planTxt.replace(/\s+/g, " "));
+rec("deps: nothing installed without a click", (await app.evaluate(() => globalThis.__deps.installs.length)) === 0);
+await page.locator('[data-testid="dep-host-install"]').click();
+await page.waitForFunction(() => document.querySelector('[data-testid="dep-host"]')?.getAttribute("data-state") === "installing", null, { timeout: 8000 });
+rec("deps: click -> installing with progress (approved=true sent)", JSON.stringify(await app.evaluate(() => globalThis.__deps.installs)) === JSON.stringify([["host", true]]) && /40%/.test(await page.locator('[data-testid="dep-host-state"]').innerText()));
+await snap(page, "07-deps-installing");
+await app.evaluate(() => { globalThis.__deps.host = "installed"; globalThis.__deps.podman = "installed"; });
+await page.waitForFunction(() => document.querySelector('[data-testid="dep-host"]')?.getAttribute("data-state") === "installed", null, { timeout: 10000 });
+rec("deps: flips to installed on its own (3s poll, no click)", true);
+await page.waitForFunction(() => !document.querySelector('[data-testid="deps-continue"]').disabled, null, { timeout: 8000 });
+rec("deps: Continue enabled only when all required are installed", true);
+await snap(page, "08-deps-ready");
+await cont.click();
+rec("deps: Continue goes to the name step", (await page.locator("#sandbox-name").count()) === 1);
+await snap(page, "09-name-step");
 await page.getByRole("button", { name: /Cancel|Back|Close/ }).first().click().catch(() => {});
 
 // Workspace-open FAILURE path (v0.1.8): cookie write rejects -> picker shows error + Retry, not stuck on "Opening your workspace...".

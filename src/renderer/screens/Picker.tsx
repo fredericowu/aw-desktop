@@ -1,3 +1,4 @@
+import { Dependencies } from "./Dependencies";
 import { useCallback, useEffect, useState } from "react";
 import type {
   AccountInfo,
@@ -5,8 +6,6 @@ import type {
   AuthState,
   BootstrapProgress,
   LocalHostStatus,
-  RuntimeCheck,
-  RuntimeKind,
   WorkspaceInfo,
 } from "../../shared/types";
 import { STEP_LABEL, STEP_ORDER, rowState } from "../../shared/bootstrapState";
@@ -17,12 +16,6 @@ import {
 } from "../../shared/workspaces";
 
 const CLOUD_UNAVAILABLE = "Feature is not available at this time.";
-
-const RUNTIME_LABEL: Record<RuntimeKind, string> = {
-  podman: "Podman",
-  "docker-desktop": "Docker Desktop",
-  colima: "Colima",
-};
 
 type Load =
   | { phase: "loading" }
@@ -365,8 +358,7 @@ function CreateWizard({
   onCreated: () => void;
 }) {
   const [step, setStep] = useState<"runtime" | "name">("runtime");
-  const [check, setCheck] = useState<RuntimeCheck | null>(null);
-  const [checking, setChecking] = useState(false);
+  const [depsReady, setDepsReady] = useState(false);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -384,21 +376,6 @@ function CreateWizard({
       }
     }).catch(() => undefined);
   }, []);
-
-  const podmanReady = !!check?.runtimes.some((r) => r.kind === "podman" && r.installed && r.running);
-
-  const recheck = useCallback(async () => {
-    setChecking(true);
-    try {
-      setCheck(await window.aw.checkRuntime());
-    } finally {
-      setChecking(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void recheck();
-  }, [recheck]);
 
   async function create() {
     setBusy(true);
@@ -421,65 +398,16 @@ function CreateWizard({
           </>
         ) : step === "runtime" ? (
           <>
-            <span className="dim">Step 1 of 2 — Set up your sandbox</span>
-            <strong>Checking your machine</strong>
+            <span className="dim">Step 1 of 2 — Dependencies</span>
+            <strong>Set up what your sandbox needs</strong>
             <span className="dim">
-              A local sandbox runs in a container on this Mac — we're confirming you have what it needs.
+              A local sandbox needs a few things on this Mac. Nothing is installed until you approve it. This list
+              updates on its own.
             </span>
-            <div className="runtime-row" data-testid="runtime-status">
-              <div>
-                <div>Container runtime</div>
-                <div className="dim">Podman (Docker Desktop alone is not enough)</div>
-              </div>
-              <span className={podmanReady && !checking ? "ok" : "dim"}>
-                {checking || !check ? "Checking…" : podmanReady ? "Found" : "Podman not ready"}
-              </span>
-            </div>
-            {check && (
-              <ul className="runtime-list">
-                {check.runtimes.map((r) => (
-                  <li key={r.kind} className="dim">
-                    {RUNTIME_LABEL[r.kind]}:{" "}
-                    {!r.installed ? "not installed" : r.running ? "running" : "installed, not running"}
-                  </li>
-                ))}
-              </ul>
-            )}
-            {check && !podmanReady && (
-              <>
-                <span className="dim">
-                  Setting up a local sandbox always needs the Podman command-line tool, even if you use Docker
-                  Desktop. We can install and start Podman for you (no admin password, no Homebrew), or you can
-                  install it yourself and re-check.
-                </span>
-                <div className="guide">
-                  <strong>Docker Desktop</strong>
-                  <div className="dim">Not sufficient on its own: Podman is still required alongside it.</div>
-                  <a href="https://www.docker.com/products/docker-desktop/" target="_blank" rel="noreferrer">
-                    Download Docker Desktop ↗
-                  </a>
-                </div>
-                <div className="guide">
-                  <strong>Podman</strong>
-                  <div className="dim">A lighter, daemon-less alternative — works just as well for running a sandbox.</div>
-                  <a href="https://podman.io/docs/installation" target="_blank" rel="noreferrer">
-                    Download Podman ↗
-                  </a>
-                </div>
-              </>
-            )}
-            <button className="secondary" onClick={() => void recheck()} disabled={checking}>
-              I've installed it — Re-check
+            <Dependencies onReady={setDepsReady} />
+            <button className="primary" disabled={!depsReady} data-testid="deps-continue" onClick={() => setStep("name")}>
+              Continue
             </button>
-            {podmanReady ? (
-              <button className="primary" onClick={() => setStep("name")}>
-                Continue
-              </button>
-            ) : (
-              <button className="primary" disabled={!check || checking} onClick={() => setStep("name")}>
-                Install Podman for me
-              </button>
-            )}
           </>
         ) : (
           <>
