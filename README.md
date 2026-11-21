@@ -84,6 +84,27 @@ Produces an **unsigned** `.app`/`.dmg` under `dist/` — fine for local
 testing, not for distribution (macOS Gatekeeper will refuse an unsigned,
 unnotarized app on another machine).
 
+## Bundling the workspace UI
+
+`npm run dist` / the release workflow bundle the workspace UI via
+`scripts/fetch-ui.sh`, which shallow-clones the **public**
+`fredericowu/aw-workspace-ui` anonymously (no token, no secret). Set
+`AW_UI_SRC=/path/to/aw-workspace-ui` to reuse a local checkout, or
+`AW_UI_REPO_TOKEN` only if you point it at a private fork.
+
+## E2E harness (packaged app, macOS)
+
+`e2e/run.mjs` drives the real packaged `AW Desktop.app` through Playwright
+`_electron` against `e2e/mock-backend.mjs`. Its only extra dependency,
+`playwright-core`, is a devDependency, so a clean `npm ci` is enough
+(no browser download needed, Electron is driven directly):
+
+```bash
+npm ci && npm run dist
+node e2e/mock-backend.mjs <port> <cert.pem> <key.pem> <work>/mock.jsonl &
+NODE_TLS_REJECT_UNAUTHORIZED=0 node e2e/run.mjs "dist/mac-arm64/AW Desktop.app" <work> <port>
+```
+
 ## What's missing for a first signed release
 
 None of these secrets exist yet on `fredericowu/aw-desktop` — `.github/workflows/release.yml`
