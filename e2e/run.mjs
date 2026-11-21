@@ -1,5 +1,5 @@
 // Drives the REAL packaged AW Desktop.app (Playwright _electron) against mock-backend.mjs.
-// Usage: node run.mjs <AW Desktop.app> <workdir> <port>
+// Usage: NODE_TLS_REJECT_UNAUTHORIZED=0 node run.mjs <AW Desktop.app> <workdir> <port>
 // Never touches ~/.aw-remote-host: it only reads host status. Does NOT click "Create".
 import { _electron as electron } from "playwright-core";
 import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
@@ -14,9 +14,14 @@ const logLines = () => readFileSync(join(work, "mock.jsonl"), "utf8").trim().spl
 
 const app = await electron.launch({
   executablePath: join(appPath, "Contents/MacOS/AW Desktop"),
-  args: [`--user-data-dir=${join(work, "userdata")}`],
+  args: [`--user-data-dir=${join(work, "userdata")}`, "--ignore-certificate-errors"],
   env: { ...process.env, AW_DESKTOP_APEX: `127.0.0.1.nip.io:${port}`, NODE_TLS_REJECT_UNAUTHORIZED: "0" },
 });
+// A headless/ssh Mac session cannot answer the macOS Keychain prompt that safeStorage.encryptString
+// raises on first save of the token; it blocks the main process forever. Stub it for the harness only.
+// APEX carries a port in this harness; Chromium rejects a cookie Domain with a port, so session.cookies.set rejects (prod apex has no port).
+await app.evaluate(({ session }) => { const c = session.defaultSession.cookies; c.set = async () => {}; c.remove = async () => {}; });
+await app.evaluate(({ safeStorage }) => { safeStorage.encryptString = (s) => Buffer.from(s); safeStorage.decryptString = (b) => b.toString(); safeStorage.isEncryptionAvailable = () => true; });
 const authPage = async () => { for (let i = 0; i < 50; i++) { const w = app.windows().find((x) => !x.url().includes(".workspace.")); if (w) return w; await new Promise((r) => setTimeout(r, 200)); } throw new Error("no auth window"); };
 const snap = async (page, name) => {
   const p = join(shots, name + ".png"); await page.screenshot({ path: p }); console.log("SHOT", p);
@@ -53,7 +58,7 @@ rec("google: awdesktop://auth callback exchanged, landed on picker", true);
 await snap(page, "04-landing-local-cloud");
 rec("landing: Local block present", await page.locator('[data-testid="local-block"]').isVisible());
 rec("landing: Cloud block present", await page.locator('[data-testid="cloud-block"]').isVisible());
-const cloudBtn = page.locator('[data-testid="cloud-block"] button');
+const cloudBtn = page.locator('[data-testid="cloud-block"] button[aria-describedby="cloud-caption"]');
 rec("cloud: create button disabled", await cloudBtn.first().isDisabled());
 const cap = (await page.locator('[data-testid="cloud-caption"]').innerText()).trim();
 rec("cloud: caption 'Feature is not available at this time'", /Feature is not available at this time/.test(cap), cap);
@@ -65,23 +70,25 @@ rec("cloud: forced click makes no POST /api/workspaces", before === after, `${be
 await snap(page, "05-cloud-disabled");
 
 // guided local wizard (runtime probe + Re-check); stops before any create
-await page.getByRole("button", { name: /Create|local/i }).filter({ hasNot: page.locator("[disabled]") }).first().click();
+await page.locator('[data-testid="local-block"]').getByRole("button", { name: /Create/ }).first().click();
 await page.waitForSelector('[data-testid="runtime-status"], [data-testid="already-linked"]', { timeout: 20000 });
 await snap(page, "06-wizard-runtime");
 const linked = await page.locator('[data-testid="already-linked"]').count();
+const dlg = async () => (await page.locator('[role="dialog"]').innerText().catch(() => "")).replace(/\s+/g, " ").slice(0, 600);
+console.log("DIALOG", JSON.stringify(await dlg()));
 rec("wizard: runtime probe rendered", (await page.locator('[data-testid="runtime-status"]').count()) > 0, "already-linked guard shown: " + (linked > 0));
 const recheck = page.getByRole("button", { name: /Re-check/ });
-if (await recheck.count()) { await recheck.first().click(); await page.waitForTimeout(2500); await snap(page, "07-wizard-recheck"); rec("wizard: Re-check clicked", true); }
+if (await recheck.count()) { await recheck.first().click(); await page.waitForTimeout(2500); await snap(page, "07-wizard-recheck"); console.log("DIALOG2", JSON.stringify(await dlg())); rec("wizard: Re-check clicked", true); }
 else rec("wizard: Re-check button visible (runtime missing only)", true, "not shown: runtime already ready or host linked");
 await page.getByRole("button", { name: /Cancel|Back|Close/ }).first().click().catch(() => {});
 
 // Switch Workspace (Cmd+Shift+W menu item): open the shell, then switch back
 await page.waitForTimeout(500);
-await page.locator('[data-testid^="remote-"] button, [data-testid^="remote-"]').first().click().catch(() => {});
-await page.waitForTimeout(2500);
+await page.getByRole("button", { name: /mock-cloud/ }).first().click().catch((e) => console.log("row click failed", String(e).slice(0, 120)));
+await page.waitForTimeout(4000);
 const shell = app.windows().find((x) => x.url().includes(".workspace."));
 if (shell) { await snap(shell, "08-shell-window"); rec("workspace opens in shell window", true, shell.url()); }
-else rec("workspace opens in shell window", false, "no shell window (row not clickable in mock)");
+else rec("workspace opens in shell window", false, "no shell window; windows=" + app.windows().map((x) => x.url()).join(" | "));
 await menu("Switch Workspace");
 await page.waitForTimeout(2000);
 rec("Switch Workspace: shell closed, picker shown", !app.windows().some((x) => x.url().includes(".workspace.")) && (await page.locator('[data-testid="local-block"]').isVisible()));
