@@ -14,7 +14,7 @@ if [ -z "$src" ]; then
   if [ -n "${AW_UI_REPO_TOKEN:-}" ]; then
     url="https://x-access-token:${AW_UI_REPO_TOKEN}@github.com/fredericowu/aw-workspace-ui.git"
   fi
-  git -c credential.helper= clone --depth 1 "$url" "$src" >/dev/null
+  GIT_TERMINAL_PROMPT=0 git -c credential.helper= clone --depth 1 "$url" "$src" >/dev/null
 fi
 (cd "$src" && npm ci --ignore-scripts && npx vite build --outDir "$PWD/dist-desktop" --emptyOutDir)
 rm -rf "$out"; mkdir -p "$out"
