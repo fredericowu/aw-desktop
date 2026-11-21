@@ -64,11 +64,11 @@ export interface FlowDeps {
   /** Records when the CLI last detached for a slug. The control plane then keeps
    * provisioning inside the LaunchAgent, so a second CLI run within the grace
    * window would race it (same container name). */
-  handoff?: { lastLaunchedAt(slug: string): number | null; markLaunched(slug: string, at: number): void; clear?(slug: string): void };
+  handoff?: { lastLaunchedAt(slug: string): number | null; markLaunched(slug: string, at: number): void };
   handoffGraceMs?: number;
 }
 
-/** Row statuses (aw-backend) meaning the background install is not progressing. */
+/** Row statuses (aw-backend) meaning provisioning ended without a running workspace. */
 const DEAD_STATUSES = new Set(["error", "stopped"]);
 
 export const HANDOFF_GRACE_MS = 45 * 60 * 1000;
@@ -112,14 +112,14 @@ export async function runBootstrapFlow(slug: string, deps: FlowDeps): Promise<Bo
     // keep monitoring instead of launching a second installer.
     const last = deps.handoff?.lastLaunchedAt(slug) ?? null;
     let monitorOnly = !pre.needsToken && last !== null && deps.now() - last < (deps.handoffGraceMs ?? HANDOFF_GRACE_MS);
-    // Wait-only is for a HEALTHY installer. If the control plane already reports the
-    // row failed/stopped, the background bootstrap is dead: Retry must re-run
-    // bootstrap-workspace (it reinstalls the service, which reconnects).
+    // Wait-only. If the control plane already reports the row error/stopped, do NOT
+    // relaunch: on reconnect aw-backend only provisions rows still "provisioning" and
+    // marks any other row running without starting its container, so a relaunch would
+    // open a workspace that never came up. Fail clearly instead.
     if (monitorOnly) {
       const seen = await pollOnce(deps, slug, 30_000);
       if (DEAD_STATUSES.has(seen)) {
-        monitorOnly = false;
-        deps.handoff?.clear?.(slug);
+        throw new Error(`The control plane reports this workspace as "${seen}". Setup can't be resumed from here (a reconnect would mark it running without provisioning it). Delete the workspace and create it again.`);
       }
     }
     if (monitorOnly) line("Setup was already handed to this Mac's background service; waiting for it to finish instead of starting another install.");
@@ -151,8 +151,7 @@ export async function runBootstrapFlow(slug: string, deps: FlowDeps): Promise<Bo
       const status = await pollOnce(deps, slug, deadline - deps.now());
       if (status === "running") break;
       if (deps.now() > deadline) {
-        // A timed-out wait is not a healthy installer: let the next Retry re-run bootstrap.
-        deps.handoff?.clear?.(slug);
+        // Keep the hand-off: a timeout is not evidence the background installer stopped.
         throw new Error(`workspace did not reach running (last status: ${status || "unknown"})`);
       }
       await deps.sleep(interval);
