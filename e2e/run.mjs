@@ -103,6 +103,13 @@ await page.waitForFunction(() => document.querySelector('[data-testid="dep-podma
 rec("deps: click -> installing with progress (approved=true sent)", JSON.stringify(await app.evaluate(() => globalThis.__deps.installs)) === JSON.stringify([["podman", true]]) && /40%/.test(await page.locator('[data-testid="dep-podman-state"]').innerText()));
 await snap(page, "07-deps-installing");
 await app.evaluate(() => { globalThis.__deps.podman = "installed"; });
+// Manual Re-check: flip the stub back to missing and click; must update well inside the 3s poll interval.
+await app.evaluate(() => { globalThis.__deps.podman = "missing"; });
+await page.locator('[data-testid="deps-recheck"]').click();
+const tRc = Date.now();
+await page.waitForFunction(() => document.querySelector('[data-testid="dep-podman"]')?.getAttribute("data-state") === "missing", null, { timeout: 2500, polling: 50 }).catch(() => {});
+rec("deps: Re-check click updates immediately (before the 3s poll)", (await stateOf("podman")) === "missing" && Date.now() - tRc < 2500);
+await app.evaluate(() => { globalThis.__deps.podman = "installed"; });
 await page.waitForFunction(() => document.querySelector('[data-testid="dep-podman"]')?.getAttribute("data-state") === "installed", null, { timeout: 10000 });
 rec("deps: flips to installed on its own (3s poll, no click)", true);
 await page.waitForFunction(() => !document.querySelector('[data-testid="deps-continue"]').disabled, null, { timeout: 8000 });

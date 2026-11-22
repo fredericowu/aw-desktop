@@ -69,7 +69,7 @@ describe("Picker landing", () => {
     render(<Picker state={state} />);
     await screen.findByTestId("local-block");
     expect(screen.getByTestId("local-badge").textContent).toBe("0/2");
-    expect(screen.getByText("No local workspaces yet — create one to get started.")).toBeTruthy();
+    expect(screen.getByText("No local workspaces yet: create one to get started.")).toBeTruthy();
     expect(screen.getByText("No cloud workspaces yet.")).toBeTruthy();
   });
 
@@ -226,6 +226,19 @@ describe("guided create", () => {
     expect((screen.getByTestId("deps-continue") as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByTestId("dep-podman-install"));
     await waitFor(() => expect(b.depsInstall).toHaveBeenCalledWith("podman", true));
+  });
+
+  it("Re-check click reruns the probe immediately, independent of the poll timer", async () => {
+    const b = bridge();
+    await openWizard(b);
+    await screen.findByTestId("dep-podman");
+    await waitFor(() => expect((screen.getByTestId("deps-recheck") as HTMLButtonElement).disabled).toBe(false));
+    const calls = b.depsList.mock.calls.length;
+    b.depsList.mockResolvedValue(allReady);
+    fireEvent.click(screen.getByTestId("deps-recheck"));
+    await waitFor(() => expect(b.depsList.mock.calls.length).toBe(calls + 1));
+    await waitFor(() => expect(screen.getByTestId("dep-podman").getAttribute("data-state")).toBe("installed"));
+    expect((screen.getByTestId("deps-continue") as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("flips missing -> installing -> installed on its own and only then enables Continue", async () => {
