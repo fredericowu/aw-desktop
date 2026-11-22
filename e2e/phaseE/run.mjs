@@ -4,10 +4,9 @@
 import { writeFileSync, renameSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { launch, pickerWindow, waitShell, snap, jwt, log, rec, summary, files, keychainItem, UD, sleep, switchWorkspace } from "./common.mjs";
-import { snapshot, teardown, leftovers, wsState, registryWorkspaces } from "./teardown.mjs";
+import { snapshot, adopt, teardown, leftovers, wsState, registryWorkspaces } from "./teardown.mjs";
 
 const DO_TEARDOWN = process.argv.includes("--teardown");
-const PORT1 = 9031, PORT2 = 9033;
 const NAME1 = "e2e-one", NAME2 = "e2e-two";
 
 async function createWorkspace(p, name) {
@@ -17,6 +16,7 @@ async function createWorkspace(p, name) {
   await p.locator('[data-testid="deps-continue"]').click();
   await p.fill("#sandbox-name", name);
   await p.locator(".modal button.primary").click();
+  return adopt(name);
 }
 const api = (s, path, init) => s.evaluate(async ([u, o]) => { const x = await fetch(u, o); const t = await x.text(); let b; try { b = JSON.parse(t); } catch { b = t; } return { status: x.status, body: b }; }, [path, init]);
 
@@ -61,7 +61,8 @@ rec("s5: no storage warning with a working Keychain", !(await page.locator('[dat
 await snap(page, "s5-picker");
 
 // ---- Step 6: two real local workspaces ----
-await createWorkspace(page, NAME1);
+const w1 = await createWorkspace(page, NAME1);
+const PORT1 = w1.uiPort;
 const s1 = await waitShell(app, PORT1, 120);
 await s1.waitForLoadState("load").catch(() => {});
 await s1.waitForTimeout(3000);
@@ -89,8 +90,8 @@ page = await pickerWindow(app);
 await page.bringToFront();
 await page.waitForSelector('[data-testid="local-block"]', { timeout: 20000 });
 rec("s6: picker after switch shows 1/2", (await page.locator('[data-testid="local-badge"]').innerText()) === "1/2");
-await createWorkspace(page, NAME2);
-const s2 = await waitShell(app, PORT2, 120);
+const w2 = await createWorkspace(page, NAME2);
+const s2 = await waitShell(app, w2.uiPort, 120);
 await s2.waitForLoadState("load").catch(() => {});
 rec("s6: workspace 2 healthy on its own port", (await api(s2, "/api/health")).status === 200);
 await switchWorkspace(app);
@@ -134,9 +135,9 @@ rec("s7: the other workspace untouched (machine and port still up)", keep.machin
 
 // ---- Step 8: create again after removal ----
 const NAME3 = "e2e-three";
-await createWorkspace(page, NAME3);
-const ws3port = (() => { const w = registryWorkspaces().find((x) => x.name === NAME3); return w?.uiPort; })();
-const s3 = await waitShell(app, ws3port ?? PORT2, 120);
+const w3 = await createWorkspace(page, NAME3);
+const ws3port = w3.uiPort;
+const s3 = await waitShell(app, ws3port, 120);
 await s3.waitForLoadState("load").catch(() => {});
 rec("s8: re-created workspace healthy after a removal", (await api(s3, "/api/health")).status === 200, `port ${ws3port}`);
 await snap(s3, "s8-shell3");

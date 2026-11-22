@@ -12,9 +12,11 @@ needs a real Mac and takes several minutes (machine init + image pulls).
   answer the Keychain prompt and the app blocks.
 - `AW Desktop.app` installed (default `/Applications/AW Desktop.app`).
 - The bundled podman at `~/podman-dist/podman/bin/podman` (the app's own runtime).
-- Pre-existing local workspaces are safe: the run snapshots the `local*` ids and
-  busy ports 9031-9034 before it starts, and teardown/leftovers only touch ids
-  that appeared afterwards. Free ports 9031-9034 are still needed for the run.
+- Other workspaces are safe: teardown/leftovers only touch the ids the run itself
+  created (taken from the registry entry for each name the harness chose), never
+  anything another profile adds mid-run. The run waits on the port the registry
+  assigned to its workspace, so a stopped workspace holding 9031/9032 no longer
+  stalls it. Busy ports 9031-9034 are snapshotted and excluded from the port check.
 - Ports 9031-9034 free, `playwright-core` (`npm ci`, no browser download).
 - A test-account JWT in a file (never commit it).
 
@@ -69,6 +71,7 @@ and run `node drive.mjs <up|stop|destroy> <root> <id> <apiPort> <uiPort> <uiDir>
 - A new workspace comes up healthy and the picker is back to 2/2.
 
 **Teardown and leftovers** (`teardown.mjs`; assertions only with `--teardown`)
+- `podman machine rm` succeeded for every run-created workspace (a failure is reported and that workspace's dirs/registry entry are kept so the checks below still see it).
 - No podman machines, containers or processes for run-created workspaces.
 - Ports 9031-9034 not listening (ports busy before the run are excluded).
 - Run-created `~/.awd/local*`, `~/aw-workspaces/local*`, `/tmp/aw-local*` gone.
