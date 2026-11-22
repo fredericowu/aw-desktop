@@ -153,7 +153,7 @@ export function Picker({ state }: { state: AuthState }) {
               </span>
             </div>
             {local.length === 0 ? (
-              <span className="dim">No local workspaces yet: create one to get started.</span>
+              <span className="dim">No local workspaces yet. Create one to get started.</span>
             ) : (
               <div className="workspace-list">
                 {local.map((ws) => (

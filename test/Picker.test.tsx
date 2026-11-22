@@ -69,7 +69,7 @@ describe("Picker landing", () => {
     render(<Picker state={state} />);
     await screen.findByTestId("local-block");
     expect(screen.getByTestId("local-badge").textContent).toBe("0/2");
-    expect(screen.getByText("No local workspaces yet: create one to get started.")).toBeTruthy();
+    expect(screen.getByText("No local workspaces yet. Create one to get started.")).toBeTruthy();
     expect(screen.getByText("No cloud workspaces yet.")).toBeTruthy();
   });
 
