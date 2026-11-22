@@ -28,8 +28,10 @@ What the code does today (all on `origin/main` at `c0d4e4b`):
 - The engine is not bundled. It is downloaded from GitHub after a user click,
   into `~/podman-dist/podman` (`src/main/dependencies.ts:7-14`,
   `src/main/depsRuntime.ts:46-72`). That path is shared with aw-remote-host's
-  own bootstrap (`src/main/runtimeProbe.ts:26-27`), and the installer deletes
-  the directory before copying (`src/main/depsRuntime.ts:61`).
+  own bootstrap (`src/main/runtimeProbe.ts:26-27`). The installer removes the
+  `~/podman-dist/podman` subdirectory before copying the new one in, and
+  rewrites `~/podman-dist/env.sh` (`src/main/depsRuntime.ts:59-67`). It does
+  not remove the parent `~/podman-dist`.
 - Health is checked once, at start (`src/main/localRuntime.ts:461-463`).
   "Running" is an in-memory set that is never re-validated
   (`src/main/localWorkspaces.ts:63`, `:77-83`). A crashed VM keeps a "running"
@@ -129,11 +131,56 @@ Product Owner accepting the core and apps contract change as scope.
   and with it any named volume or container state an app created through the
   engine socket. If the VM cannot be started after the retries, the workspace
   goes to "needs attention" and stays there.
-- Re-creating a VM is a separate, user-confirmed action. It is allowed only
-  when the app has proof the VM holds no workload data: the VM is running and
-  the engine lists no named volumes and no containers other than the three the
-  app created. If the engine cannot be asked, there is no proof and the action
-  is refused. A backup and restore path for engine volumes is not designed
+- Re-creating a VM is a separate, user-confirmed action. An empty volume list
+  and no extra containers are necessary but not sufficient: state can also sit
+  in a container's writable layer, which dies with the VM. The action is
+  allowed only when every check below passes, all read-only, all against a
+  running engine. Any check that fails, errors, or cannot be run refuses the
+  action (fail closed). A VM that is not running cannot be asked, so it is
+  always refused.
+  1. The engine lists zero named volumes (`podman volume ls`).
+  2. The engine lists exactly the three containers the app creates
+     (`containerNames`, `src/main/localRuntime.ts:122`: postgres, redis,
+     workspace) and no others. Each must carry a label naming this workspace
+     id. The label is new: card 6 adds it to the three `run` argument builders
+     (`:188-205`, `:240`). A container without it, which includes every
+     container made by an earlier build, is unproven and refuses the action
+     until it is recreated by a build that sets the label.
+  3. Each of the three has only the mounts the app gave it. `podman inspect`
+     shows no anonymous or named volume, and the only bind sources are the
+     workspace data dirs and the engine socket (`:184-186`, `:242-246`). This
+     is what proves postgres, redis and the core keep their data on the Mac.
+  4. Each container's writable layer holds nothing beyond an allowlist.
+     `podman diff <container>` is read for each; any changed path outside the
+     allowlist refuses. The allowlist (temp and cache paths per image) is
+     defined from a measured run in card 6, not guessed here. Until card 6
+     lands that allowlist, the answer is "unproven", so the action stays
+     refused.
+  5. The checks run in one pass immediately before the confirmation, and
+     again after the user confirms. Before the first pass the app quiesces the
+     workspace with a new operation that stops only the three containers
+     (`podman stop`) and leaves the VM and its engine running. The existing
+     workspace stop path cannot be used: it also stops the VM
+     (`src/main/localRuntime.ts:484-489`), after which the engine cannot be
+     asked and the guard would refuse every workspace. The container
+     inventory in checks 2 and 4 lists all states (`podman ps -a`), so a
+     stopped or exited extra container still counts. If the inventory changed
+     between the two passes, refuse.
+  6. The removal itself is a new VM-only operation, not the existing Remove
+     path. Remove deletes the workspace data dirs and unregisters the
+     workspace (`src/main/localRuntime.ts:500-549`,
+     `src/main/localWorkspaces.ts:106`), which would destroy exactly the data
+     checks 1 to 4 say is safe. The VM-only operation removes the machine and
+     its machine config dirs under the workspace's podman `HOME` and nothing
+     else: the registry entry, the data dir and the workspace dir stay. It
+     then creates a fresh VM and restarts the workspace. Its successful-path
+     test seeds representative files in the Postgres, Redis and workspace
+     bind-mount dirs and asserts, after the re-create, that the files are
+     byte-identical and the registry entry is unchanged.
+
+  The guard does not outlive the VM it describes. Removing the VM discards the
+  evidence, so the proof is taken from the live VM that is about to be
+  removed, never from a stored result or an earlier session. A backup and restore path for engine volumes is not designed
   here; until one exists, a VM that holds volumes and will not start is a
   support case, not something the app repairs.
 - Launch: for every registry entry, stop any VM left running by a previous
@@ -204,10 +251,13 @@ be proven on a Mac that already has workspaces.
 
 ## Decision 7: test guard
 
-- `e2e/phaseE/teardown.mjs` `snapshot()` (`:33-36`) records the host's
-  `podman-machine-default` running state and the `:9030` health status;
-  a new host-integrity check asserts both are unchanged. Read-only commands
-  only. A change fails the run with its own message and nothing tries to repair
+- Host state capture is new. Today `snapshot()`
+  (`e2e/phaseE/teardown.mjs:33-36`) records only the registry ids and which of
+  the test ports 9031-9034 were already listening; it records nothing about
+  the host's `podman-machine-default` or `:9030`. Card 1 adds a capture of the
+  host's `podman-machine-default` running state and the `:9030` health status
+  before the run, and a host-integrity check that asserts both are unchanged
+  after it. Read-only commands only. A change fails the run with its own message and nothing tries to repair
   it.
 - The host check must fail the run in every mode. It cannot simply join
   `leftovers()` (`e2e/phaseE/teardown.mjs:93-111`), because the runner records
@@ -299,3 +349,46 @@ Acceptance checks for the set:
   restarted by recovery and becomes healthy again.
 - No automatic path removes a VM. Re-create is refused when the engine lists a
   named volume or cannot be asked.
+
+Acceptance per card. Each is a pass/fail check a reviewer can run on the merged
+change.
+
+- Card 1 (phaseE guard): simulate a host VM that is running in the before
+  snapshot and stopped in the after snapshot. The run exits non-zero with a
+  host-integrity message, with and without `--teardown`. A run with identical
+  before and after host state passes, including when the host VM is stopped
+  throughout. The harness env test asserts podman is called with only the
+  four variables the app uses.
+- Card 2 (bundle): the signed, notarized build boots a VM on a clean Mac with
+  no `~/podman-dist`. A Mac with existing per-workspace VMs starts them with
+  the bundled binaries and the same engine version. `~/podman-dist` is
+  untouched afterwards (checksum of the directory listing).
+- Card 3 (preflight): no Dependencies step renders. With virtualization
+  unavailable, low RAM or low disk, the user sees the plain message from card
+  4 and no VM is attempted.
+- Card 4 (copy): a wording test fails if any user-facing string contains
+  "podman" or a raw VM name. Unknown stderr maps to `start_failed`, never to a
+  specific wrong message. Raw stderr goes to the diagnostics log only.
+- Card 5 (supervisor): the three recovery scenarios in the set-level checks
+  pass, and Remove during recovery does not race it.
+- Card 6 (guards, prune, re-create): the re-create checks 1 to 5 above each
+  have a test where that check alone fails and the action is refused. The
+  VM-only removal (6) has the data-survival test described there. "Free up
+  space" removes images only; a test with a named volume present shows the
+  volume survives. The `podman diff` allowlist is written down from a
+  measured run.
+- Card 7 (engine-host split): no behaviour change. The existing test suite
+  passes unchanged, and a diff of the `podman` argument lists the macOS path
+  produces, before and after, is identical.
+- Card 8 (Windows design): delivers an ADR section, not code. It must state
+  the WSL2 mapping of Decisions 1-7, name what has no equivalent, and list
+  the checks that could not be run without a Windows host. The owner accepts
+  it before any Windows implementation card exists.
+- Card 9 (spike, only if shared is still wanted): answers one question with a
+  measurement. Can two nested engines in one VM run `aw-app-*` containers of
+  the same names without collision? Reports yes or no with the commands run.
+  Produces no code to merge.
+
+Gate: the owner decision on one VM per workspace versus shared is still open.
+No implementation card (1 to 9) is created or dispatched until the owner
+answers it on the card.
