@@ -50,3 +50,9 @@ export function hostIntegrityError(before, after) {
   if (before.health !== after.health) diffs.push(`:9030 health ${before.health} -> ${after.health}`);
   return diffs.length ? `host state changed during the run: ${diffs.join("; ")}` : null;
 }
+
+// Only a complete diagnostic line that names THIS machine as absent counts as "already gone". A generic
+// "not found" (e.g. "vfkit helper not found in PATH") means podman could not even try, so the VM may
+// survive. Anchored per line and limited to [ \t] so "aw-local1-backup" or a newline-split message
+// cannot satisfy it for "aw-local1".
+export const machineGone = (id, out) => new RegExp(`^[ \\t]*(?:Error:[ \\t]+)?(?:aw-${id}:?[ \\t]+(?:vm[ \\t]+|machine[ \\t]+)?(?:does not exist|not found)|no such (?:vm|machine):?[ \\t]+aw-${id})[ \\t]*\\r?$`, "im").test(out);

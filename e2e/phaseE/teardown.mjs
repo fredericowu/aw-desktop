@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { APP, HOME, UD, log } from "./common.mjs";
-import { HOST_HEALTH_URL, parseHostMachine, toolEnv, workspacePodmanEnv } from "./guard.mjs";
+import { HOST_HEALTH_URL, machineGone, parseHostMachine, toolEnv, workspacePodmanEnv } from "./guard.mjs";
 
 const PODMAN = process.env.AW_E2E_PODMAN ?? join(APP, "Contents/Resources/engine/bin/podman");
 const HOMES = join(HOME, ".awd");
@@ -71,10 +71,6 @@ const owned = () => {
   if (!baseline) throw new Error("teardown.snapshot() must run before the run creates workspaces; refusing to guess what is safe to delete");
   return [...adopted];
 };
-// Only a diagnostic that names THIS machine as absent counts as "already gone". A generic "not found"
-// (e.g. "vfkit helper not found in PATH") means podman could not even try, so the VM may survive.
-const machineGone = (id, out) => new RegExp(`aw-${id}\\b[^\\n]*(does not exist|no such|not found)|no such (vm|machine)[^\\n]*aw-${id}\\b`, "i").test(out);
-
 export async function teardown() {
   removalFailures = [];
   const keep = new Set();
