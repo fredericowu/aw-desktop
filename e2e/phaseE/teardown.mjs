@@ -5,18 +5,20 @@
 // records the busy ports before the run so they are excluded from the port check.
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { HOME, UD, log } from "./common.mjs";
+import { HOST_HEALTH_URL, parseHostMachine, toolEnv, workspacePodmanEnv } from "./guard.mjs";
 
 const PODMAN = process.env.AW_E2E_PODMAN ?? join(HOME, "podman-dist/podman/bin/podman");
 const HOMES = join(HOME, ".awd");
 const DATA = join(HOME, "aw-workspaces");
 const REGISTRY = join(UD, "local-workspaces.json");
 const PORTS = [9031, 9032, 9033, 9034];
-const run = (cmd, args, env = {}) => { try { return { code: 0, out: execFileSync(cmd, args, { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"], timeout: 120000 }).toString() }; } catch (e) { return { code: e.status ?? 1, out: String(e.stdout ?? "") + String(e.stderr ?? "") }; } };
+// `env` is the COMPLETE child environment (hermetic): nothing is inherited from the caller.
+const run = (cmd, args, env = toolEnv()) => { try { return { code: 0, out: execFileSync(cmd, args, { env, stdio: ["ignore", "pipe", "pipe"], timeout: 120000 }).toString() }; } catch (e) { return { code: e.status ?? 1, out: String(e.stdout ?? "") + String(e.stderr ?? "") }; } };
 const registry = () => (existsSync(REGISTRY) ? JSON.parse(readFileSync(REGISTRY, "utf8")) : { version: 1, workspaces: [] });
 const dirs = (root, re) => (existsSync(root) ? readdirSync(root).filter((d) => re.test(d)) : []);
-const podmanEnv = (id) => ({ HOME: join(HOMES, id, "home"), TMPDIR: join("/tmp", `aw-${id}`) });
+const podmanEnv = (id) => workspacePodmanEnv(PODMAN, HOMES, id);
 // Query podman as workspace <id>. All of that workspace's podman state lives under its own HOME, so
 // once that dir is gone there is nothing to ask: running podman anyway only errors (the error text
 // was being read as container/network names) and re-creates /tmp/aw-<id>/storage-run-<uid> as a
@@ -24,6 +26,22 @@ const podmanEnv = (id) => ({ HOME: join(HOMES, id, "home"), TMPDIR: join("/tmp",
 const podmanFor = (id, args) => (existsSync(podmanEnv(id).HOME) ? run(PODMAN, args, podmanEnv(id)) : { code: 0, out: "" });
 
 const listening = (p) => run("lsof", ["-nP", `-iTCP:${p}`, "-sTCP:LISTEN"]).out.trim() !== "";
+
+/**
+ * Read-only capture of what the run must never touch: the host's own podman machine and the live
+ * workspace on :9030. This is the one place that uses the real HOME (the host VM lives there); it
+ * only lists machines and GETs /api/health, and nothing here ever tries to repair a difference.
+ */
+export async function hostState() {
+  // Keep the host's own podman config/data roots (XDG_*, CONTAINERS_CONF) so a host VM defined
+  // outside ~/.config is still seen; workspace calls stay isolated (workspacePodmanEnv).
+  const keep = ["TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "CONTAINERS_CONF", "CONTAINERS_MACHINE_PROVIDER"].filter((k) => process.env[k]);
+  const hostEnv = { ...toolEnv(), HOME, ...Object.fromEntries(keep.map((k) => [k, process.env[k]])) };
+  const r = run(PODMAN, ["machine", "list", "--format", "{{.Name}}\t{{.Running}}"], { ...hostEnv, PATH: `${dirname(PODMAN)}:${hostEnv.PATH}` });
+  const machine = r.code === 0 ? parseHostMachine(r.out) : "unknown";
+  const health = await fetch(HOST_HEALTH_URL, { signal: AbortSignal.timeout(5000) }).then((x) => String(x.status), () => "down");
+  return { machine, health };
+}
 let baseline = null;
 // Ids of workspaces this run created. Kept for the whole run (never dropped after teardown), so the
 // leftovers checks can still look for a workspace whose removal failed.
