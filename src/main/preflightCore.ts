@@ -18,7 +18,8 @@ export interface PreflightProbe {
   freeDiskBytes: number;
   /** Absolute path of the per-workspace homes root (~/.awd). */
   homesRoot: string;
-  engineBinExists: boolean;
+  /** The bundled engine binary exists AND runs (`--version` exits 0). */
+  engineRuns: boolean;
   hypervisorSupported(): Promise<boolean>;
 }
 
@@ -37,7 +38,7 @@ const msg = (code: PreflightCode, extra = ""): PreflightResult => ({
 /** Pure given a probe. First failing check wins; cheap checks run before the hypervisor query. */
 export async function runPreflight(p: PreflightProbe): Promise<PreflightResult> {
   if (p.platform !== "darwin" || p.arch !== "arm64") return msg("virtualization_unavailable");
-  if (!p.engineBinExists) return msg("engine_missing");
+  if (!p.engineRuns) return msg("engine_missing");
   if (Buffer.byteLength(`${p.homesRoot}/${SOCKET_SUFFIX}`) > MAX_SOCKET_PATH_BYTES) return msg("path_too_long");
   if (p.totalMemBytes < MIN_TOTAL_MEMORY_BYTES) return msg("low_memory");
   if (p.freeDiskBytes < MIN_FREE_DISK_BYTES) {

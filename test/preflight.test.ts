@@ -8,7 +8,7 @@ const good = (over: Partial<PreflightProbe> = {}): PreflightProbe => ({
   totalMemBytes: 16 * GIB,
   freeDiskBytes: 100 * GIB,
   homesRoot: "/Users/frederico/.awd",
-  engineBinExists: true,
+  engineRuns: true,
   hypervisorSupported: async () => true,
   ...over,
 });
@@ -25,7 +25,7 @@ describe("silent preflight", () => {
     ["hypervisor query throws", { hypervisorSupported: async () => { throw new Error("x"); } }, "virtualization_unavailable"],
     ["low memory", { totalMemBytes: MIN_TOTAL_MEMORY_BYTES - 1 }, "low_memory"],
     ["low disk", { freeDiskBytes: MIN_FREE_DISK_BYTES - 1 }, "low_disk"],
-    ["engine missing", { engineBinExists: false }, "engine_missing"],
+    ["engine missing or cannot run", { engineRuns: false }, "engine_missing"],
     ["socket path too long", { homesRoot: "/Users/" + "a".repeat(60) + "/.awd" }, "path_too_long"],
   ] as const)("%s refuses with code %s", async (_n, over, code) => {
     const r = await runPreflight(good(over as Partial<PreflightProbe>));
@@ -46,7 +46,7 @@ describe("silent preflight", () => {
 
   it("no user-facing message mentions the engine, a VM, a container or an image", async () => {
     const cases: Partial<PreflightProbe>[] = [
-      { arch: "x64" }, { totalMemBytes: 0 }, { freeDiskBytes: 0 }, { engineBinExists: false }, { homesRoot: "/Users/" + "a".repeat(80) },
+      { arch: "x64" }, { totalMemBytes: 0 }, { freeDiskBytes: 0 }, { engineRuns: false }, { homesRoot: "/Users/" + "a".repeat(80) },
     ];
     for (const c of cases) {
       const r = await runPreflight(good(c));

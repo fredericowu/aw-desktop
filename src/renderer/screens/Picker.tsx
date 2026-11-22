@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AccountInfo,
   ApiResult,
@@ -433,16 +433,20 @@ function CreateWizard({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Silent preflight: no step, no list. Only a failure is ever shown, in plain words.
-  useEffect(() => {
-    let live = true;
+  const live = useRef(true);
+  const check = useCallback(() => {
     window.aw
       .preflight()
-      .then((r) => live && setBlocked(r.ok ? null : r.message ?? "This Mac can't run local workspaces."))
+      .then((r) => live.current && setBlocked(r.ok ? null : r.message ?? "This Mac can't run local workspaces."))
       .catch(() => undefined);
-    return () => {
-      live = false;
-    };
   }, []);
+  useEffect(() => {
+    live.current = true;
+    check();
+    return () => {
+      live.current = false;
+    };
+  }, [check]);
   async function create() {
     setBusy(true);
     setError(null);
@@ -474,6 +478,11 @@ function CreateWizard({
           <span className="error" role="alert" data-testid="preflight-blocked">
             {blocked}
           </span>
+        )}
+        {blocked && (
+          <button className="link" data-testid="preflight-recheck" onClick={check}>
+            Check again
+          </button>
         )}
         {error && <span className="error">{error}</span>}
         <button className="primary" disabled={busy || !!blocked || !name.trim()} onClick={() => void create()}>

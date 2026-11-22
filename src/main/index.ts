@@ -331,6 +331,8 @@ function registerIpcHandlers(): void {
     return scopedExclusive<ApiResult<WorkspaceInfo>>(setupSlot, sessionScope, BUSY, async (scope, handOff) => {
       try {
         const pre = await preflight();
+        // Sign-out can land while the probe runs: never create a registry row for a dead session.
+        if (!scope.isCurrent()) return { ok: false, error: "session_lost" };
         if (!pre.ok) return { ok: false, error: pre.message, code: pre.code };
         const ws = await local.registry.create(sub, name);
         const row = local_row(ws.id);

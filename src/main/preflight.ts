@@ -11,7 +11,13 @@ function hvSupport(): Promise<boolean> {
   );
 }
 
-function realProbe(): PreflightProbe {
+function engineRuns(): Promise<boolean> {
+  const bin = podmanBinPath();
+  if (!existsSync(bin)) return Promise.resolve(false);
+  return new Promise((resolve) => execFile(bin, ["--version"], { timeout: 8000 }, (err) => resolve(!err)));
+}
+
+async function realProbe(): Promise<PreflightProbe> {
   const home = homedir();
   let free = Number.POSITIVE_INFINITY;
   try {
@@ -26,9 +32,9 @@ function realProbe(): PreflightProbe {
     totalMemBytes: totalmem(),
     freeDiskBytes: free,
     homesRoot: runtimeConfig("", home).homesRoot,
-    engineBinExists: existsSync(podmanBinPath()),
+    engineRuns: await engineRuns(),
     hypervisorSupported: hvSupport,
   };
 }
 
-export const preflight = (): Promise<PreflightResult> => runPreflight(realProbe());
+export const preflight = (): Promise<PreflightResult> => realProbe().then(runPreflight);

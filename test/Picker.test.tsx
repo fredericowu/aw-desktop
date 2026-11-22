@@ -214,6 +214,19 @@ describe("guided create", () => {
     expect(b.createLocalWorkspace).not.toHaveBeenCalled();
   });
 
+  it("Check again re-runs the preflight and enables Create without losing the typed name", async () => {
+    const pre = vi.fn(async (): Promise<PreflightResult> => ({ ok: false, code: "low_disk", message: "Not enough free disk space. Free up 4 GB and try again." }));
+    const b = bridge({ preflight: pre });
+    await openWizard(b);
+    await screen.findByTestId("preflight-blocked");
+    fireEvent.change(screen.getByLabelText("Workspace name"), { target: { value: "keepme" } });
+    pre.mockResolvedValue({ ok: true });
+    fireEvent.click(screen.getByTestId("preflight-recheck"));
+    await waitFor(() => expect(screen.queryByTestId("preflight-blocked")).toBeNull());
+    expect((screen.getByLabelText("Workspace name") as HTMLInputElement).value).toBe("keepme");
+    expect((screen.getByText("Create workspace") as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("creates a local workspace through the bridge with the typed name", async () => {
     const b = bridge();
     await openWizard(b);
