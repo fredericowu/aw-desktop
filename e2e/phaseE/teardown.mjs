@@ -53,7 +53,9 @@ const owned = () => {
   if (!baseline) throw new Error("teardown.snapshot() must run before the run creates workspaces; refusing to guess what is safe to delete");
   return [...adopted];
 };
-const GONE = /no such|does not exist|not found|cannot find/i;
+// Only a diagnostic that names THIS machine as absent counts as "already gone". A generic "not found"
+// (e.g. "vfkit helper not found in PATH") means podman could not even try, so the VM may survive.
+const machineGone = (id, out) => new RegExp(`aw-${id}\\b[^\\n]*(does not exist|no such|not found)|no such (vm|machine)[^\\n]*aw-${id}\\b`, "i").test(out);
 
 export async function teardown() {
   removalFailures = [];
@@ -63,7 +65,7 @@ export async function teardown() {
     // Only delete the dirs (the handle podmanFor needs to find the VM again) once podman confirms the
     // machine is gone; otherwise keep them so leftovers() still reports the surviving machine.
     const r = podmanFor(id, ["machine", "rm", "--force", `aw-${id}`]);
-    if (r.code !== 0 && !GONE.test(r.out)) {
+    if (r.code !== 0 && !machineGone(id, r.out)) {
       removalFailures.push(`${id}: podman machine rm exit ${r.code}: ${r.out.trim().slice(0, 200)}`);
       keep.add(id);
       continue;
