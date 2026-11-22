@@ -45,124 +45,131 @@ if (process.env.AW_E2E_RESET_AUTH === "1") {
 }
 const hostBefore = await hostState();
 log("host state before (must be unchanged after the run):", JSON.stringify(hostBefore));
-snapshot();
-log("keychain item before:", keychainItem(), "files:", files());
-let app = await launch();
-let page = await pickerWindow(app);
-await page.waitForSelector('input[type="email"], input[type="password"]', { timeout: 20000 });
-rec("s5: fresh launch shows login (no session)", true, "version " + (await app.evaluate(({ app }) => app.getVersion())));
-rec("s5: launch without a session does not touch Keychain", keychainItem() === "absent" || files().length === 0, `keychain=${keychainItem()}`);
-const enc = await app.evaluate(({ safeStorage }, j) => ({ avail: safeStorage.isEncryptionAvailable(), b64: safeStorage.encryptString(j).toString("base64") }), jwt());
-rec("s5: safeStorage encrypts the session token", enc.avail && enc.b64.length > 0);
-writeFileSync(join(UD, "session.bin"), Buffer.from(enc.b64, "base64"));
-await app.close();
-app = await launch();
-page = await pickerWindow(app);
-rec("s5: relaunch loads the saved session and reaches the picker", await page.waitForSelector('[data-testid="local-block"]', { timeout: 30000 }).then(() => true).catch(() => false));
-await sleep(1500);
-rec("s5: no storage warning with a working Keychain", !(await page.locator('[data-testid="storage-warning"]').isVisible().catch(() => false)));
-await snap(page, "s5-picker");
+// Everything after the baseline runs inside try so the host-integrity check below still runs (and the
+// original error is preserved) when a step or teardown throws.
+let ok = false, fatal = null;
+try {
+  snapshot();
+  log("keychain item before:", keychainItem(), "files:", files());
+  let app = await launch();
+  let page = await pickerWindow(app);
+  await page.waitForSelector('input[type="email"], input[type="password"]', { timeout: 20000 });
+  rec("s5: fresh launch shows login (no session)", true, "version " + (await app.evaluate(({ app }) => app.getVersion())));
+  rec("s5: launch without a session does not touch Keychain", keychainItem() === "absent" || files().length === 0, `keychain=${keychainItem()}`);
+  const enc = await app.evaluate(({ safeStorage }, j) => ({ avail: safeStorage.isEncryptionAvailable(), b64: safeStorage.encryptString(j).toString("base64") }), jwt());
+  rec("s5: safeStorage encrypts the session token", enc.avail && enc.b64.length > 0);
+  writeFileSync(join(UD, "session.bin"), Buffer.from(enc.b64, "base64"));
+  await app.close();
+  app = await launch();
+  page = await pickerWindow(app);
+  rec("s5: relaunch loads the saved session and reaches the picker", await page.waitForSelector('[data-testid="local-block"]', { timeout: 30000 }).then(() => true).catch(() => false));
+  await sleep(1500);
+  rec("s5: no storage warning with a working Keychain", !(await page.locator('[data-testid="storage-warning"]').isVisible().catch(() => false)));
+  await snap(page, "s5-picker");
 
-// ---- Step 6: two real local workspaces ----
-const w1 = await createWorkspace(page, NAME1);
-const PORT1 = w1.uiPort;
-const s1 = await waitShell(app, PORT1, 120);
-await s1.waitForLoadState("load").catch(() => {});
-await s1.waitForTimeout(3000);
-rec("s6: workspace 1 shell served on its own port", s1.url().startsWith(`http://127.0.0.1:${PORT1}`), s1.url());
-rec("s6: /api/health 200 through the front server", (await api(s1, "/api/health")).status === 200);
-await snap(s1, "s6-shell1");
+  // ---- Step 6: two real local workspaces ----
+  const w1 = await createWorkspace(page, NAME1);
+  const PORT1 = w1.uiPort;
+  const s1 = await waitShell(app, PORT1, 120);
+  await s1.waitForLoadState("load").catch(() => {});
+  await s1.waitForTimeout(3000);
+  rec("s6: workspace 1 shell served on its own port", s1.url().startsWith(`http://127.0.0.1:${PORT1}`), s1.url());
+  rec("s6: /api/health 200 through the front server", (await api(s1, "/api/health")).status === 200);
+  await snap(s1, "s6-shell1");
 
-const cat = await api(s1, "/api/apps/-/catalog?refresh=true");
-const n = Array.isArray(cat.body) ? cat.body.length : (cat.body?.apps?.length ?? 0);
-rec("s6: marketplace catalog loads through the local workspace", cat.status === 200 && n > 0, `${n} apps`);
-const hosts = await s1.evaluate(() => [...new Set(performance.getEntriesByType("resource").map((e) => new URL(e.name).host))]);
-rec("s6: UI only talks to 127.0.0.1 (plus fonts)", hosts.every((h) => h.startsWith("127.0.0.1") || h === "fonts.googleapis.com" || h === "fonts.gstatic.com"), hosts.join(","));
+  const cat = await api(s1, "/api/apps/-/catalog?refresh=true");
+  const n = Array.isArray(cat.body) ? cat.body.length : (cat.body?.apps?.length ?? 0);
+  rec("s6: marketplace catalog loads through the local workspace", cat.status === 200 && n > 0, `${n} apps`);
+  const hosts = await s1.evaluate(() => [...new Set(performance.getEntriesByType("resource").map((e) => new URL(e.name).host))]);
+  rec("s6: UI only talks to 127.0.0.1 (plus fonts)", hosts.every((h) => h.startsWith("127.0.0.1") || h === "fonts.googleapis.com" || h === "fonts.gstatic.com"), hosts.join(","));
 
-const t = await api(s1, "/api/terminals", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "e2e-pty" }) });
-const tid = t.body?.id;
-await api(s1, `/api/terminals/${tid}/write`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: "echo PTY_OK_$((6*7))", send_enter: true }) });
-await sleep(2500);
-const sb = await api(s1, `/api/terminals/${tid}/scrollback`);
-rec("s6: terminal PTY executes a command", String(sb.body?.content ?? "").includes("PTY_OK_42"));
-await api(s1, `/api/terminals/${tid}`, { method: "DELETE" });
+  const t = await api(s1, "/api/terminals", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "e2e-pty" }) });
+  const tid = t.body?.id;
+  await api(s1, `/api/terminals/${tid}/write`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: "echo PTY_OK_$((6*7))", send_enter: true }) });
+  await sleep(2500);
+  const sb = await api(s1, `/api/terminals/${tid}/scrollback`);
+  rec("s6: terminal PTY executes a command", String(sb.body?.content ?? "").includes("PTY_OK_42"));
+  await api(s1, `/api/terminals/${tid}`, { method: "DELETE" });
 
-await switchWorkspace(app);
-await sleep(2500);
-page = await pickerWindow(app);
-await page.bringToFront();
-await page.waitForSelector('[data-testid="local-block"]', { timeout: 20000 });
-rec("s6: picker after switch shows 1/2", (await page.locator('[data-testid="local-badge"]').innerText()) === "1/2");
-const w2 = await createWorkspace(page, NAME2);
-const s2 = await waitShell(app, w2.uiPort, 120);
-await s2.waitForLoadState("load").catch(() => {});
-rec("s6: workspace 2 healthy on its own port", (await api(s2, "/api/health")).status === 200);
-await switchWorkspace(app);
-await sleep(2500);
-page = await pickerWindow(app);
-await page.bringToFront();
-await page.waitForSelector('[data-testid="local-block"]');
-rec("s6: picker shows 2/2", (await page.locator('[data-testid="local-badge"]').innerText()) === "2/2");
-await page.getByRole("button", { name: /Create new (workspace|sandbox)/ }).first().click();
-await sleep(1500);
-const dialogs = await page.locator(".modal").allInnerTexts();
-rec("s6: third create is refused by the free-tier cap, wizard not shown", /free-tier limit/i.test(dialogs.join(" ")) && (await page.locator("#sandbox-name").count()) === 0);
-await snap(page, "s6-cap-refused");
-await page.getByText("Got it").click().catch(() => {});
+  await switchWorkspace(app);
+  await sleep(2500);
+  page = await pickerWindow(app);
+  await page.bringToFront();
+  await page.waitForSelector('[data-testid="local-block"]', { timeout: 20000 });
+  rec("s6: picker after switch shows 1/2", (await page.locator('[data-testid="local-badge"]').innerText()) === "1/2");
+  const w2 = await createWorkspace(page, NAME2);
+  const s2 = await waitShell(app, w2.uiPort, 120);
+  await s2.waitForLoadState("load").catch(() => {});
+  rec("s6: workspace 2 healthy on its own port", (await api(s2, "/api/health")).status === 200);
+  await switchWorkspace(app);
+  await sleep(2500);
+  page = await pickerWindow(app);
+  await page.bringToFront();
+  await page.waitForSelector('[data-testid="local-block"]');
+  rec("s6: picker shows 2/2", (await page.locator('[data-testid="local-badge"]').innerText()) === "2/2");
+  await page.getByRole("button", { name: /Create new (workspace|sandbox)/ }).first().click();
+  await sleep(1500);
+  const dialogs = await page.locator(".modal").allInnerTexts();
+  rec("s6: third create is refused by the free-tier cap, wizard not shown", /free-tier limit/i.test(dialogs.join(" ")) && (await page.locator("#sandbox-name").count()) === 0);
+  await snap(page, "s6-cap-refused");
+  await page.getByText("Got it").click().catch(() => {});
 
-// ---- Step 7: Remove button, for real (workspace 2 of 2) ----
-const regBefore = registryWorkspaces();
-const ws2 = regBefore.find((w) => w.name === NAME2);
-const ws1 = regBefore.find((w) => w.name === NAME1);
-rec("s7: registry has both workspaces before removal", regBefore.length === 2 && !!ws1 && !!ws2, regBefore.map((w) => `${w.name}:${w.id}:${w.uiPort}`).join(","));
-const before = wsState(ws2.id, [ws2.uiPort, ws2.apiPort]);
-rec("s7: workspace 2 resources exist before removal (machine, dirs, port)", before.machines.length === 1 && before.dirsLeft.length > 0 && before.listening.length > 0, JSON.stringify(before));
-await page.locator(`[data-testid^="remove-"][aria-label="Remove ${NAME2}"]`).click();
-await page.locator('[data-testid="remove-modal"]').waitFor({ timeout: 10000 });
-await snap(page, "s7-remove-confirm");
-await page.locator('[data-testid="remove-confirm"]').click();
-await page.locator('[data-testid="remove-modal"]').waitFor({ state: "detached", timeout: 180000 }).catch(() => {});
-await sleep(2500);
-await snap(page, "s7-after-remove");
-rec("s7: remove modal closed without an error", (await page.locator('[data-testid="remove-error"]').count()) === 0 && (await page.locator('[data-testid="remove-modal"]').count()) === 0);
-rec("s7: picker counter went 2/2 -> 1/2", (await page.locator('[data-testid="local-badge"]').innerText()) === "1/2");
-rec("s7: removed workspace no longer listed, the other still is", (await page.locator(`[data-testid="remove-${ws2.name}"]`).count()) === 0 && (await page.locator(`[aria-label="Remove ${NAME1}"]`).count()) === 1);
-const after = wsState(ws2.id, [ws2.uiPort, ws2.apiPort]);
-rec("s7: podman machine gone", after.machines.length === 0, after.machines.join(","));
-rec("s7: containers and network gone", after.ctrs.length === 0 && after.nets.length === 0 && after.procs.length === 0, JSON.stringify({ ctrs: after.ctrs, nets: after.nets, procs: after.procs }));
-rec("s7: home/data/tmp dirs gone", after.dirsLeft.length === 0, after.dirsLeft.join(","));
-rec("s7: ports freed", after.listening.length === 0, after.listening.join(","));
-rec("s7: registry entry gone", !after.inRegistry);
-const keep = wsState(ws1.id, [ws1.uiPort]);
-rec("s7: the other workspace untouched (machine and port still up)", keep.machines.length === 1 && keep.listening.length === 1, JSON.stringify({ m: keep.machines, l: keep.listening }));
+  // ---- Step 7: Remove button, for real (workspace 2 of 2) ----
+  const regBefore = registryWorkspaces();
+  const ws2 = regBefore.find((w) => w.name === NAME2);
+  const ws1 = regBefore.find((w) => w.name === NAME1);
+  rec("s7: registry has both workspaces before removal", regBefore.length === 2 && !!ws1 && !!ws2, regBefore.map((w) => `${w.name}:${w.id}:${w.uiPort}`).join(","));
+  const before = wsState(ws2.id, [ws2.uiPort, ws2.apiPort]);
+  rec("s7: workspace 2 resources exist before removal (machine, dirs, port)", before.machines.length === 1 && before.dirsLeft.length > 0 && before.listening.length > 0, JSON.stringify(before));
+  await page.locator(`[data-testid^="remove-"][aria-label="Remove ${NAME2}"]`).click();
+  await page.locator('[data-testid="remove-modal"]').waitFor({ timeout: 10000 });
+  await snap(page, "s7-remove-confirm");
+  await page.locator('[data-testid="remove-confirm"]').click();
+  await page.locator('[data-testid="remove-modal"]').waitFor({ state: "detached", timeout: 180000 }).catch(() => {});
+  await sleep(2500);
+  await snap(page, "s7-after-remove");
+  rec("s7: remove modal closed without an error", (await page.locator('[data-testid="remove-error"]').count()) === 0 && (await page.locator('[data-testid="remove-modal"]').count()) === 0);
+  rec("s7: picker counter went 2/2 -> 1/2", (await page.locator('[data-testid="local-badge"]').innerText()) === "1/2");
+  rec("s7: removed workspace no longer listed, the other still is", (await page.locator(`[data-testid="remove-${ws2.name}"]`).count()) === 0 && (await page.locator(`[aria-label="Remove ${NAME1}"]`).count()) === 1);
+  const after = wsState(ws2.id, [ws2.uiPort, ws2.apiPort]);
+  rec("s7: podman machine gone", after.machines.length === 0, after.machines.join(","));
+  rec("s7: containers and network gone", after.ctrs.length === 0 && after.nets.length === 0 && after.procs.length === 0, JSON.stringify({ ctrs: after.ctrs, nets: after.nets, procs: after.procs }));
+  rec("s7: home/data/tmp dirs gone", after.dirsLeft.length === 0, after.dirsLeft.join(","));
+  rec("s7: ports freed", after.listening.length === 0, after.listening.join(","));
+  rec("s7: registry entry gone", !after.inRegistry);
+  const keep = wsState(ws1.id, [ws1.uiPort]);
+  rec("s7: the other workspace untouched (machine and port still up)", keep.machines.length === 1 && keep.listening.length === 1, JSON.stringify({ m: keep.machines, l: keep.listening }));
 
-// ---- Step 8: create again after removal ----
-const NAME3 = "e2e-three";
-const w3 = await createWorkspace(page, NAME3);
-const ws3port = w3.uiPort;
-const s3 = await waitShell(app, ws3port, 120);
-await s3.waitForLoadState("load").catch(() => {});
-rec("s8: re-created workspace healthy after a removal", (await api(s3, "/api/health")).status === 200, `port ${ws3port}`);
-await snap(s3, "s8-shell3");
-await switchWorkspace(app);
-await sleep(2500);
-page = await pickerWindow(app);
-await page.bringToFront();
-await page.waitForSelector('[data-testid="local-block"]');
-rec("s8: picker shows 2/2 again", (await page.locator('[data-testid="local-badge"]').innerText()) === "2/2");
-await snap(page, "s8-picker");
+  // ---- Step 8: create again after removal ----
+  const NAME3 = "e2e-three";
+  const w3 = await createWorkspace(page, NAME3);
+  const ws3port = w3.uiPort;
+  const s3 = await waitShell(app, ws3port, 120);
+  await s3.waitForLoadState("load").catch(() => {});
+  rec("s8: re-created workspace healthy after a removal", (await api(s3, "/api/health")).status === 200, `port ${ws3port}`);
+  await snap(s3, "s8-shell3");
+  await switchWorkspace(app);
+  await sleep(2500);
+  page = await pickerWindow(app);
+  await page.bringToFront();
+  await page.waitForSelector('[data-testid="local-block"]');
+  rec("s8: picker shows 2/2 again", (await page.locator('[data-testid="local-badge"]').innerText()) === "2/2");
+  await snap(page, "s8-picker");
 
-await app.close();
-const ok = summary();
-
-// ---- Teardown + leftovers ----
-if (DO_TEARDOWN) await teardown();
-const left = await leftovers();
+  await app.close();
+  ok = summary();
+} catch (e) {
+  fatal = e;
+  console.error(e);
+}
+if (DO_TEARDOWN) { try { await teardown(); } catch (e) { fatal ??= e; console.error(e); } }
+let left = {};
+try { left = await leftovers(); } catch (e) { fatal ??= e; console.error(e); }
 for (const [k, v] of Object.entries(left)) rec(`leftovers: ${k}`, DO_TEARDOWN ? v.ok : true, v.detail);
 // Host integrity is its own result, counted with or without --teardown (never folded into leftovers).
-const hostAfter = await hostState();
-const hostErr = hostIntegrityError(hostBefore, hostAfter);
+let hostAfter = null, hostErr;
+try { hostAfter = await hostState(); hostErr = hostIntegrityError(hostBefore, hostAfter); } catch (e) { hostErr = `host probe threw: ${e}`; }
 rec("host integrity: podman-machine-default and :9030 unchanged", hostErr === null, hostErr ?? JSON.stringify(hostAfter));
 const final = summary();
 if (!DO_TEARDOWN) console.log("(leftovers reported only; re-run with --teardown to clean up and assert they are gone)");
-process.exit(ok && final ? 0 : 1);
+process.exit(ok && final && !fatal ? 0 : 1);
