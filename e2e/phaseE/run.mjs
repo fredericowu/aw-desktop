@@ -4,7 +4,7 @@
 import { writeFileSync, renameSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { launch, pickerWindow, waitShell, snap, jwt, log, rec, summary, files, keychainItem, UD, sleep, switchWorkspace } from "./common.mjs";
-import { teardown, leftovers, wsState, registryWorkspaces } from "./teardown.mjs";
+import { snapshot, teardown, leftovers, wsState, registryWorkspaces } from "./teardown.mjs";
 
 const DO_TEARDOWN = process.argv.includes("--teardown");
 const PORT1 = 9031, PORT2 = 9033;
@@ -42,6 +42,7 @@ if (process.env.AW_E2E_RESET_AUTH === "1") {
 } else if (AUTH_FILES.some((f) => existsSync(join(UD, f)))) {
   log("WARNING: existing auth files in", UD, "- a stale safestorage-disabled flag makes the step 5 relaunch fail; set AW_E2E_RESET_AUTH=1 to back them up and start clean");
 }
+snapshot();
 log("keychain item before:", keychainItem(), "files:", files());
 let app = await launch();
 let page = await pickerWindow(app);

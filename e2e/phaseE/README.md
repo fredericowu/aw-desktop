@@ -12,9 +12,9 @@ needs a real Mac and takes several minutes (machine init + image pulls).
   answer the Keychain prompt and the app blocks.
 - `AW Desktop.app` installed (default `/Applications/AW Desktop.app`).
 - The bundled podman at `~/podman-dist/podman/bin/podman` (the app's own runtime).
-- **A private node**: do not point this at a machine whose podman machines or
-  ports 9031-9034 you care about. Teardown deletes `~/.awd/local*`,
-  `~/aw-workspaces/local*` and `/tmp/aw-local*`.
+- Pre-existing local workspaces are safe: the run snapshots the `local*` ids and
+  busy ports 9031-9034 before it starts, and teardown/leftovers only touch ids
+  that appeared afterwards. Free ports 9031-9034 are still needed for the run.
 - Ports 9031-9034 free, `playwright-core` (`npm ci`, no browser download).
 - A test-account JWT in a file (never commit it).
 
@@ -69,16 +69,15 @@ and run `node drive.mjs <up|stop|destroy> <root> <id> <apiPort> <uiPort> <uiDir>
 - A new workspace comes up healthy and the picker is back to 2/2.
 
 **Teardown and leftovers** (`teardown.mjs`; assertions only with `--teardown`)
-- No `aw-local*` podman machines.
-- No `aw-local*` containers/processes.
-- Ports 9031-9034 not listening.
-- `~/.awd/local*`, `~/aw-workspaces/local*`, `/tmp/aw-local*` gone.
-- Registry (`local-workspaces.json`) has no workspaces.
+- No podman machines, containers or processes for run-created workspaces.
+- Ports 9031-9034 not listening (ports busy before the run are excluded).
+- Run-created `~/.awd/local*`, `~/aw-workspaces/local*`, `/tmp/aw-local*` gone.
+- Registry (`local-workspaces.json`) has no run-created entries.
 
 ## Known gaps (not fixed by this harness)
 
-1. Teardown still deletes machines, dirs and registry entries directly as a
-   safety net; step 7 exercises the real in-app Remove button.
+1. Teardown still deletes run-created machines, dirs and registry entries
+   directly as a safety net; step 7 exercises the real in-app Remove button.
 2. **Keychain re-prompt on ad-hoc re-install.** Re-installing an ad-hoc signed
    build changes the code identity, so macOS asks for Keychain access again.
 3. **Local Network settings panel stays on "Loading…" in standalone** (a
