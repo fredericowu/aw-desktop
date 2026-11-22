@@ -77,7 +77,16 @@ export const realFs: FsOps = {
   mkdirp: (p) => void mkdirSync(p, { recursive: true }),
   writeFile: (p, d, mode) => writeFileSync(p, d, mode ? { mode } : undefined),
   readFile: (p) => (existsSync(p) ? readFileSync(p, "utf8") : null),
-  isEmptyDir: (p) => !existsSync(p) || readdirSync(p).length === 0,
+  isEmptyDir: (p) => {
+    try {
+      return readdirSync(p).length === 0;
+    } catch (err) {
+      // Only a genuinely absent path counts as empty; EACCES etc. must not look like "nothing here".
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") return true;
+      throw err;
+    }
+  },
   rmrf: (p) => rmSync(p, { recursive: true, force: true }),
 };
 
@@ -525,7 +534,13 @@ export class LocalRuntime {
     } catch (err) {
       const home = workspacePaths(this.cfg, id).home;
       const artifacts = [join(home, ".local", "share", "containers", "podman", "machine"), join(home, ".config", "containers", "podman", "machine")];
-      if (artifacts.some((d) => !this.fs.isEmptyDir(d))) throw err;
+      let present: boolean;
+      try {
+        present = artifacts.some((d) => !this.fs.isEmptyDir(d));
+      } catch {
+        present = true; // unreadable artifact path: VM presence is uncertain
+      }
+      if (present) throw err;
       return false;
     }
   }
