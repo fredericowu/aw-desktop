@@ -27,7 +27,8 @@ otool -l "$e/bin/krunkit" | grep -q "@executable_path/../lib" || bad "krunkit ha
 [ "$(otool -l "$e/bin/krunkit" | grep -c 'cmd LC_RPATH')" = 1 ] || bad "krunkit must have only the bundle's rpath (Homebrew's would be searched first)"
 for p in "$e"/bin/* "$e"/lib/*.dylib; do
   [ -f "$p" ] || continue
-  otool -L "$p" | tail -n +2 | awk '{print $1}' | grep -E "^/(opt|usr/local)/" && bad "${p#"$e"/} links outside the bundle"
+  deps="$(otool -L "$p")" || { bad "${p#"$e"/}: otool could not inspect it"; continue; }
+  echo "$deps" | tail -n +2 | awk '{print $1}' | grep -E "^/(opt|usr/local)/" && bad "${p#"$e"/} links outside the bundle"
 done
 codesign --verify --deep --strict "$app" || bad "app deep verify failed"
 if [ "${2:-}" = "--notarized" ]; then
