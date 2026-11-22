@@ -77,6 +77,21 @@ and run `node drive.mjs <up|stop|destroy> <root> <id> <apiPort> <uiPort> <uiDir>
 - Run-created `~/.awd/local*`, `~/aw-workspaces/local*`, `/tmp/aw-local*` gone.
 - Registry (`local-workspaces.json`) has no run-created entries.
 
+## Host guard and hermetic environment
+
+- Before the run the harness records the host's `podman-machine-default` state
+  (running/stopped/absent) and the `:9030` health status (read-only: `machine list`
+  and one GET). After the run it compares them; any difference is its own
+  `host integrity` result and fails the exit code **with or without `--teardown`**.
+  Nothing tries to repair a difference. This is a tripwire, not a prevention: it
+  tells you the run (or something else) touched the host.
+- Every podman call for a run-created workspace gets exactly the four variables
+  the app passes (`HOME`, `TMPDIR`, `PATH`, `CONTAINERS_MACHINE_PROVIDER`), with
+  the workspace's own HOME/TMPDIR. The caller's environment is not inherited, so
+  `XDG_*` / `CONTAINER_*` cannot point a call at the real podman config. The only
+  call that uses the real HOME is the read-only host capture above.
+  The Electron app itself is still launched with the caller's environment.
+
 ## Known gaps (not fixed by this harness)
 
 1. Teardown still deletes run-created machines, dirs and registry entries

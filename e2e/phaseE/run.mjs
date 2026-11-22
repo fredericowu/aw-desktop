@@ -4,7 +4,8 @@
 import { writeFileSync, renameSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { launch, pickerWindow, waitShell, snap, jwt, log, rec, summary, files, keychainItem, UD, sleep, switchWorkspace } from "./common.mjs";
-import { snapshot, adopt, teardown, leftovers, wsState, registryWorkspaces } from "./teardown.mjs";
+import { snapshot, adopt, teardown, leftovers, wsState, registryWorkspaces, hostState } from "./teardown.mjs";
+import { hostIntegrityError } from "./guard.mjs";
 
 const DO_TEARDOWN = process.argv.includes("--teardown");
 const NAME1 = "e2e-one", NAME2 = "e2e-two";
@@ -42,6 +43,8 @@ if (process.env.AW_E2E_RESET_AUTH === "1") {
 } else if (AUTH_FILES.some((f) => existsSync(join(UD, f)))) {
   log("WARNING: existing auth files in", UD, "- a stale safestorage-disabled flag makes the step 5 relaunch fail; set AW_E2E_RESET_AUTH=1 to back them up and start clean");
 }
+const hostBefore = await hostState();
+log("host state before (must be unchanged after the run):", JSON.stringify(hostBefore));
 snapshot();
 log("keychain item before:", keychainItem(), "files:", files());
 let app = await launch();
@@ -156,6 +159,10 @@ const ok = summary();
 if (DO_TEARDOWN) await teardown();
 const left = await leftovers();
 for (const [k, v] of Object.entries(left)) rec(`leftovers: ${k}`, DO_TEARDOWN ? v.ok : true, v.detail);
+// Host integrity is its own result, counted with or without --teardown (never folded into leftovers).
+const hostAfter = await hostState();
+const hostErr = hostIntegrityError(hostBefore, hostAfter);
+rec("host integrity: podman-machine-default and :9030 unchanged", hostErr === null, hostErr ?? JSON.stringify(hostAfter));
 const final = summary();
 if (!DO_TEARDOWN) console.log("(leftovers reported only; re-run with --teardown to clean up and assert they are gone)");
 process.exit(ok && final ? 0 : 1);
