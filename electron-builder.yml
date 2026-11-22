@@ -10,6 +10,9 @@ files:
 extraResources:
   - from: resources/ui
     to: ui
+  # Written by scripts/fetch-ui.sh: desktop commit, tag, bundled UI commit, workflow run id.
+  - from: resources/build-info.json
+    to: build-info.json
 protocols:
   name: AW Desktop
   schemes:
@@ -53,4 +56,4 @@ publish:
   # default — invisible/undownloadable to anyone without repo write
   # access. A direct-download app needs a real, public release the
   # moment a tag is pushed.
-  releaseType: release
+  releaseType: prerelease

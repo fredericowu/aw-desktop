@@ -29,8 +29,9 @@ for dmg in "${dmgs[@]}"; do
   rm -f "$dmg.blockmap"
 done
 
-# Publish: the release may not exist yet (windows job runs after this one).
-gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes "AW Desktop $TAG" --verify-tag
+# Publish as a PRERELEASE: it is invisible to the auto-updater (releases/latest) until a human
+# promotes it (see README "Promoting a release"). Publish: the release may not exist yet (windows job runs after this one).
+gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes "AW Desktop $TAG" --verify-tag --prerelease
 # Stage under the names in latest-mac.yml: files on disk contain a space
 # ("AW Desktop-..."), which GitHub would rewrite to "AW.Desktop-...".
 stage="$(mktemp -d)"
