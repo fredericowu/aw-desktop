@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 // @ts-expect-error plain ESM harness module, no type declarations
-import { hostIntegrityError, parseHostMachine, workspacePodmanEnv } from "../e2e/phaseE/guard.mjs";
+import { hostIntegrityError, machineGone, parseHostMachine, workspacePodmanEnv } from "../e2e/phaseE/guard.mjs";
 import { podmanEnv } from "../src/main/localRuntime";
 
 describe("phaseE harness environment", () => {
@@ -41,5 +41,18 @@ describe("phaseE host integrity", () => {
   });
   it("passes on identical state, including a host VM stopped throughout", () => {
     expect(hostIntegrityError({ machine: "stopped", health: "down" }, { machine: "stopped", health: "down" })).toBeNull();
+  });
+});
+
+describe("phaseE machineGone", () => {
+  it("accepts a complete diagnostic naming the exact machine", () => {
+    expect(machineGone("local1", "Error: aw-local1: VM does not exist")).toBe(true);
+    expect(machineGone("local1", "aw-local1 not found\n")).toBe(true);
+    expect(machineGone("local1", "Error: no such vm: aw-local1")).toBe(true);
+  });
+  it("rejects a generic failure, another machine, or a message split across lines", () => {
+    expect(machineGone("local1", "cannot remove machine aw-local1: vfkit helper not found in PATH")).toBe(false);
+    expect(machineGone("local1", "Error: no such VM: aw-local1-backup")).toBe(false);
+    expect(machineGone("local1", "aw-local1:\nnot found in PATH")).toBe(false);
   });
 });
