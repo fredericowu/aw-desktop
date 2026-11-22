@@ -28,3 +28,9 @@ export function failureCopy(code: FailureCode, gb?: number): string {
 
 /** Progress copy: the six internal step ids collapse to two phases (ADR 0001). */
 export const PHASE_LABEL = { preparing: "Preparing your workspace", starting: "Starting workspace" } as const;
+
+/** Supervisor status copy (ADR 0001): same plain-language rule as the failure copy above. */
+export const SUPERVISOR_COPY = {
+  starting: "Starting workspace...",
+  needs_attention: "This workspace needs attention. Retry, or copy details for support.",
+} as const;

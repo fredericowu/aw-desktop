@@ -272,6 +272,10 @@ export interface StartOptions {
   /** Called with a short step name as bring-up progresses. */
   onStep?: (step: string) => void;
   healthTimeoutMs?: number;
+  /** Supervisor recovery (ADR 0001, decision 3). A normal start leaves a running container alone;
+   * recovery restarts a running-but-unhealthy core, and treats a VM that reports running while its
+   * engine does not answer as dead. Never removes or re-creates a VM. */
+  recover?: boolean;
 }
 
 export class LocalRuntime {
@@ -292,6 +296,11 @@ export class LocalRuntime {
     this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.secret = deps.newSecret ?? (() => randomBytes(18).toString("hex"));
     this.clock = deps.now ?? Date.now;
+  }
+
+  /** HTTP status of the core's health URL on `apiPort` (0 when it does not answer). */
+  healthStatus(apiPort: number): Promise<number> {
+    return this.status(`http://127.0.0.1:${apiPort}/api/health`);
   }
 
   /** Raw podman call under this workspace's isolated env. Resolves with the result whatever the exit code. */
@@ -397,6 +406,14 @@ export class LocalRuntime {
       await this.pm(id, runArgs);
     }
   }
+  /** True when the engine inside the VM answers. */
+  private async engineReachable(id: string): Promise<boolean> {
+    return (await this.raw(id, ["--connection", machineName(id), "info"], 30_000)).code === 0;
+  }
+  private async containerRunning(id: string, name: string): Promise<boolean> {
+    if (!(await this.exists(id, ["container", "exists", name]))) return false;
+    return (await this.pm(id, ["inspect", name, "--format", "{{.State.Running}}"])).stdout.trim() === "true";
+  }
   private async waitFor(what: string, probe: () => Promise<boolean>, timeoutMs: number): Promise<void> {
     const end = this.clock() + timeoutMs;
     for (;;) {
@@ -428,7 +445,17 @@ export class LocalRuntime {
 
     step("machine");
     if (!(await this.machineExists(id))) await this.machineInit(id);
-    if (!(await this.machineRunning(id))) await this.machineStart(id);
+    let running = await this.machineRunning(id);
+    if (running && opts.recover && !(await this.engineReachable(id))) {
+      // The VM process died but its state still says running: stop it cleanly, then start below.
+      try {
+        await this.machineStop(id);
+      } catch {
+        // an already-dead VM can fail to stop; machineStart reports the real failure if it is still broken
+      }
+      running = false;
+    }
+    if (!running) await this.machineStart(id);
 
     step("image");
     await this.ensureNetwork(id);
@@ -466,10 +493,13 @@ export class LocalRuntime {
       workers: this.cfg.workers ?? 2,
       authPublicKey: opts.authPublicKey,
     };
+    const url = `http://127.0.0.1:${ws.apiPort}/api/health`;
+    const wasRunning = opts.recover ? await this.containerRunning(id, names.workspace) : false;
     await this.ensureWorkspaceContainer(id, input);
+    // A core that was already running but does not answer is hung: waiting on it would time out untouched.
+    if (wasRunning && (await this.status(url)) !== 200) await this.pm(id, ["restart", names.workspace]);
 
     step("health");
-    const url = `http://127.0.0.1:${ws.apiPort}/api/health`;
     await this.waitFor("workspace health", async () => (await this.status(url)) === 200, opts.healthTimeoutMs ?? 180_000);
     step("running");
   }

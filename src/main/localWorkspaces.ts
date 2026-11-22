@@ -10,6 +10,19 @@ import { fileStore, LocalRegistry, registryPath, type LocalWorkspace } from "./l
 import { LocalRuntime, type RuntimeConfig } from "./localRuntime";
 import type { BootstrapStepId, WorkspaceInfo } from "../shared/types";
 import { LOCAL_PLACEMENT } from "../shared/workspaces";
+import { SUPERVISOR_COPY } from "../shared/errorCopy";
+import { Supervisor, type RecoverOutcome, type SupervisedStatus } from "./supervisorCore";
+
+export const SUPERVISOR_POLL_MS = 15_000;
+
+export interface SupervisorHooks {
+  /** Runs `work` inside the app's single setup slot; resolves "busy" without running it when the slot is taken. */
+  exclusive(work: () => Promise<void>): Promise<RecoverOutcome>;
+  onStatus(id: string): void;
+  onFailure(id: string, err: unknown): void;
+  /** Key for a recovery start (identity public key). */
+  authKey(): Promise<string>;
+}
 
 /** Maps LocalRuntime.start() step names to the progress model's steps. */
 export function stepFor(runtimeStep: string): BootstrapStepId {
@@ -24,14 +37,11 @@ export function stepFor(runtimeStep: string): BootstrapStepId {
 }
 
 /** The renderer-facing row for a registry record (`name` is the registry id, the slug `pickWorkspace` takes). */
-export function toWorkspaceInfo(ws: LocalWorkspace, running: boolean): WorkspaceInfo {
-  return {
-    name: ws.id,
-    display_name: ws.name,
-    placement_driver: LOCAL_PLACEMENT,
-    is_hosted: false,
-    status: running ? "running" : "stopped",
-  };
+export function toWorkspaceInfo(ws: LocalWorkspace, running: boolean, supervised: SupervisedStatus | null = null): WorkspaceInfo {
+  const base = { name: ws.id, display_name: ws.name, placement_driver: LOCAL_PLACEMENT, is_hosted: false };
+  if (running && supervised === "starting") return { ...base, status: "starting", detail: SUPERVISOR_COPY.starting };
+  if (running && supervised === "needs_attention") return { ...base, status: "needs_attention", detail: SUPERVISOR_COPY.needs_attention };
+  return { ...base, status: running ? "running" : "stopped" };
 }
 
 /** Where the bundled container engine lives: packaged resources, or AW_DESKTOP_ENGINE_DIR for dev
@@ -68,6 +78,9 @@ export class LocalWorkspaces {
   readonly runtime: LocalRuntime;
   private readonly fronts = new Map<string, FrontServer>();
   private readonly running = new Set<string>();
+  private readonly supervisor: Supervisor;
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private hooks: SupervisorHooks | null = null;
 
   constructor(getToken: () => string | null, fetchMaxLocal: (token: string) => Promise<number | undefined>) {
     const userData = app.getPath("userData");
@@ -79,6 +92,67 @@ export class LocalWorkspaces {
       },
     });
     this.runtime = new LocalRuntime(runtimeConfig(userData));
+    this.supervisor = new Supervisor({
+      healthy: async (id) => {
+        const ws = this.registry.get(id);
+        if (!ws) return false;
+        return (await this.runtime.healthStatus(ws.apiPort)) === 200;
+      },
+      recover: (id) => this.recover(id),
+      onStatus: (id) => this.hooks?.onStatus(id),
+      onFailure: (id, err) => this.hooks?.onFailure(id, err),
+    });
+  }
+
+  /** Begin polling health of every running workspace. Call once at app ready. */
+  startSupervisor(hooks: SupervisorHooks, pollMs = SUPERVISOR_POLL_MS): void {
+    this.hooks = hooks;
+    this.timer ??= setInterval(() => void this.supervisor.tick(), pollMs);
+  }
+
+  /** Check now (wake from sleep): a VM that died while the Mac slept is noticed without waiting a full poll. */
+  checkNow(): Promise<void> {
+    return this.supervisor.tick();
+  }
+
+  private async recover(id: string): Promise<RecoverOutcome> {
+    const hooks = this.hooks;
+    const ws = this.registry.get(id);
+    if (!hooks || !ws) return "busy";
+    return hooks.exclusive(async () => {
+      // The user may have stopped or removed it while we waited for the slot.
+      if (!this.supervisor.watching(id) || !this.registry.get(id)) return;
+      await this.runtime.start(ws, { authPublicKey: await hooks.authKey(), recover: true });
+    });
+  }
+
+  /** Needs attention: still holds its ports, but the picker must offer Retry (a full start) instead of Open. */
+  needsAttention(id: string): boolean {
+    return this.supervisor.status(id) === "needs_attention";
+  }
+
+  /** User-initiated stop of one workspace. Unwatched FIRST so the supervisor can never restart it. */
+  async stop(id: string): Promise<void> {
+    this.supervisor.unwatch(id);
+    await this.fronts.get(id)?.close();
+    this.fronts.delete(id);
+    try {
+      await this.runtime.stop(id);
+    } finally {
+      this.running.delete(id);
+    }
+  }
+
+  /** Launch cleanup: a force-quit leaves VMs running. Stop only machines of registry workspaces (own HOME each). */
+  async launchCleanup(onError: (id: string, err: unknown) => void = () => undefined): Promise<void> {
+    for (const ws of this.registry.list()) {
+      if (this.running.has(ws.id)) continue;
+      try {
+        await this.runtime.stop(ws.id);
+      } catch (err) {
+        onError(ws.id, err);
+      }
+    }
   }
 
   isRunning(id: string): boolean {
@@ -86,7 +160,7 @@ export class LocalWorkspaces {
   }
 
   rowsFor(sub: string): WorkspaceInfo[] {
-    return this.registry.listFor(sub).map((w) => toWorkspaceInfo(w, this.running.has(w.id)));
+    return this.registry.listFor(sub).map((w) => toWorkspaceInfo(w, this.running.has(w.id), this.supervisor.status(w.id)));
   }
 
   /** Bring the machine, containers and front server up. Returns the (possibly port-bumped) record. */
@@ -105,6 +179,7 @@ export class LocalWorkspaces {
     await front.listen();
     this.fronts.set(id, front);
     this.running.add(id);
+    this.supervisor.watch(id);
     return workspace;
   }
 
@@ -115,12 +190,16 @@ export class LocalWorkspaces {
     await this.fronts.get(id)?.close();
     this.fronts.delete(id);
     this.running.delete(id);
+    this.supervisor.unwatch(id);
     await this.runtime.destroy(id);
     this.registry.remove(id);
   }
 
   /** Stop every running workspace (app quit). Best effort per workspace so one failure does not strand the rest. */
   async stopAll(): Promise<void> {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    this.supervisor.unwatchAll();
     const ids = [...this.running];
     for (const id of ids) {
       try {

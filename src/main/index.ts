@@ -261,6 +261,30 @@ async function window_startLocal(id: string): Promise<{ ok: boolean; error?: str
   return r;
 }
 
+/** Supervisor wiring: recovery runs inside the setup slot (never races Remove or a start), failures go to the log. */
+function startLocalSupervisor(): void {
+  local.startSupervisor({
+    exclusive: async (work) => {
+      if (!setupSlot.claim()) return "busy";
+      try {
+        await work();
+        return "ok";
+      } finally {
+        setupSlot.release();
+      }
+    },
+    onStatus: (id) => liveAuthWindow()?.webContents.send("aw:workspace-status", id),
+    onFailure: (_id, err) => void logFailure("supervisor_recover", err),
+    authKey: () => identityPublicKey(),
+  });
+  // A force-quit leaves VMs running: stop them unless something already started.
+  if (setupSlot.claim()) {
+    void local
+      .launchCleanup((_id, err) => void logFailure("launch_cleanup", err))
+      .finally(() => setupSlot.release());
+  }
+}
+
 function registerIpcHandlers(): void {
   ipcMain.handle("aw:getState", () => state);
 
@@ -317,7 +341,7 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle("aw:pickWorkspace", async (_e, slug: string) => {
     const lw = local.registry.get(slug);
-    if (lw && !local.isRunning(slug)) {
+    if (lw && (!local.isRunning(slug) || local.needsAttention(slug))) {
       const r = await window_startLocal(slug);
       return r;
     }
@@ -486,7 +510,11 @@ app.whenReady().then(async () => {
   await bootstrap();
 
   setInterval(refreshLoop, REFRESH_INTERVAL_MS);
-  powerMonitor.on("resume", () => void refreshLoop());
+  powerMonitor.on("resume", () => {
+    void refreshLoop();
+    void local.checkNow();
+  });
+  startLocalSupervisor();
   void refreshLoop();
   void checkForUpdates();
 });

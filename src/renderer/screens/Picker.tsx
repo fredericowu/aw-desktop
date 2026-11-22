@@ -41,6 +41,14 @@ export function Picker({ state }: { state: AuthState }) {
     void window.aw.getBootstrapProgress().then((p) => p && p.phase !== "done" && setProgress(p));
     return window.aw.onBootstrapProgress(setProgress);
   }, []);
+  // Supervisor recovery changes a row's status without any user action: re-list quietly.
+  useEffect(() => {
+    return window.aw.onWorkspaceStatus?.(() => {
+      void window.aw.listWorkspaces().then((res) => {
+        if (res.ok && res.data) setLoad({ phase: "ready", workspaces: res.data.workspaces, account: res.data.account });
+      });
+    });
+  }, []);
 
   const refresh = useCallback(async () => {
     setLoad({ phase: "loading" });
@@ -293,6 +301,26 @@ function WorkspaceRow({
       <div className="workspace-row" data-testid={`here-${ws.name}`}>
         {open}
         <span className="dim">Runs on this Mac</span>
+        {remove}
+      </div>
+    );
+  }
+  if (ws.status === "starting") {
+    return (
+      <div className="workspace-row pending" data-testid={`starting-${ws.name}`}>
+        <span>{label}</span>
+        <span className="dim">{ws.detail}</span>
+      </div>
+    );
+  }
+  if (ws.status === "needs_attention") {
+    return (
+      <div className="workspace-row pending" data-testid={`attention-${ws.name}`}>
+        <span>{label}</span>
+        <span className="dim">{ws.detail}</span>
+        <button className="primary" onClick={onFinish}>
+          Retry
+        </button>
         {remove}
       </div>
     );

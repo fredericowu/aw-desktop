@@ -98,6 +98,22 @@ describe("Picker landing", () => {
     expect(b.pickWorkspace).toHaveBeenCalledWith("local1a2b");
   });
 
+  it("supervisor states: starting shows plain copy, needs attention offers Retry through the normal start path", async () => {
+    const b = bridge({
+      workspaces: [
+        ws({ name: "localaa", display_name: "A", status: "starting", detail: "Starting workspace..." }),
+        ws({ name: "localbb", display_name: "B", status: "needs_attention", detail: "This workspace needs attention. Retry, or copy details for support." }),
+      ],
+    });
+    render(<Picker state={state} />);
+    expect((await screen.findByTestId("starting-localaa")).textContent).toContain("Starting workspace...");
+    const row = screen.getByTestId("attention-localbb");
+    expect(row.textContent).toContain("needs attention");
+    expect(row.textContent).not.toMatch(/podman|container|machine|engine/i);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(b.finishLocalSetup).toHaveBeenCalledWith("localbb"));
+  });
+
   it("a done snapshot from main does not resurface the ready modal when the picker remounts", async () => {
     bridge({
       getBootstrapProgress: vi.fn(async (): Promise<BootstrapProgress | null> => ({
