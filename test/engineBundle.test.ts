@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { PODMAN_PKG_SHA256, PODMAN_VERSION } from "../src/main/dependencies";
+import { PODMAN_PKG_SHA256, PODMAN_VERSION } from "../src/main/enginePin";
 
 const root = join(__dirname, "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");

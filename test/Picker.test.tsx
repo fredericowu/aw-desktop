@@ -2,8 +2,8 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Picker } from "../src/renderer/screens/Picker";
-import type { DepId, DepsSnapshot, DepStatus } from "../src/shared/deps";
-import type { ApiResult, AuthState, AwBridge, BootstrapProgress, RuntimeCheck, WorkspaceInfo, WorkspaceListData } from "../src/shared/types";
+import type { PreflightResult } from "../src/shared/preflight";
+import type { ApiResult, AuthState, AwBridge, BootstrapProgress, WorkspaceInfo, WorkspaceListData } from "../src/shared/types";
 
 const state: AuthState = { stage: "picker", user: null, error: null, apex: "aw.tekflox.com" };
 const ws = (over: Partial<WorkspaceInfo>): WorkspaceInfo => ({
@@ -14,20 +14,6 @@ const ws = (over: Partial<WorkspaceInfo>): WorkspaceInfo => ({
   ...over,
 });
 let emitProgress: (p: BootstrapProgress) => void = () => undefined;
-const none: RuntimeCheck = { runtimes: [], ready: false };
-const item = (id: DepId, state: DepStatus["state"], extra: Partial<DepStatus> = {}): DepStatus => ({
-  id, title: id, sub: "", required: id !== "machine", state,
-  plan: state === "installed" ? undefined : { source: "https://x/" + id, size: "1.0 MB", checksum: "sha256 abc", dest: "~/x", needsAdmin: false },
-  ...extra,
-});
-const snapOf = (_unused: DepStatus["state"], podman: DepStatus["state"], extra: Partial<DepsSnapshot> = {}): DepsSnapshot => ({
-  platform: "darwin", supported: true,
-  items: [item("podman", podman), item("machine", "missing", { plan: undefined })],
-  ready: podman === "installed", ...extra,
-});
-const allReady = snapOf("installed", "installed");
-const found: RuntimeCheck = { runtimes: [{ kind: "podman", installed: true, running: true }], ready: true };
-
 function bridge(over: Partial<AwBridge> & { workspaces?: WorkspaceInfo[]; localCount?: number } = {}) {
   const { workspaces = [], localCount, ...rest } = over;
   const b = {
@@ -40,10 +26,7 @@ function bridge(over: Partial<AwBridge> & { workspaces?: WorkspaceInfo[]; localC
         },
       }),
     ),
-    checkRuntime: vi.fn(async () => none),
-    depsList: vi.fn(async () => snapOf("missing", "missing")),
-    depsInstall: vi.fn(async () => ({ ok: true })),
-    onDepsChanged: vi.fn(() => () => undefined),
+    preflight: vi.fn(async (): Promise<PreflightResult> => ({ ok: true })),
     createLocalWorkspace: vi.fn(async (name: string): Promise<ApiResult<WorkspaceInfo>> => ({ ok: true, data: ws({ name }) })),
     pickWorkspace: vi.fn(async () => ({ ok: true })),
     finishLocalSetup: vi.fn(async () => ({ ok: true, data: null })),
@@ -82,7 +65,7 @@ describe("Picker landing", () => {
     expect(screen.getByTestId("cloud-caption").textContent).toContain("Feature is not available at this time");
     fireEvent.click(btn);
     expect(b.createLocalWorkspace).not.toHaveBeenCalled();
-    expect(b.depsList).not.toHaveBeenCalled();
+    expect(b.preflight).not.toHaveBeenCalled();
   });
 
   it("a hosted membership shows under Cloud and opens normally", async () => {
@@ -159,13 +142,13 @@ describe("Picker landing", () => {
     expect(b.finishLocalSetup).toHaveBeenCalledWith("mine");
   });
 
-  it("at the cap, Create shows the limit modal with no runtime check or create", async () => {
+  it("at the cap, Create shows the limit modal with no preflight or create", async () => {
     const b = bridge({ workspaces: [ws({ name: "a" }), ws({ name: "b" })] });
     render(<Picker state={state} />);
     const local = await screen.findByTestId("local-block");
     fireEvent.click(local.querySelector(":scope > button")!);
     await screen.findByText("You've hit your free-tier limit");
-    expect(b.depsList).not.toHaveBeenCalled();
+    expect(b.preflight).not.toHaveBeenCalled();
     expect(b.createLocalWorkspace).not.toHaveBeenCalled();
   });
 });
@@ -182,22 +165,19 @@ describe("review fixes", () => {
     render(<Picker state={state} />);
     const local = await screen.findByTestId("local-block");
     fireEvent.click(local.querySelector(":scope > button")!);
-    await waitFor(() => expect(b.depsList).toHaveBeenCalled());
+    await waitFor(() => expect(b.preflight).toHaveBeenCalled());
     expect(screen.queryByText("You've hit your free-tier limit")).toBeNull();
   });
 
   it("Cancel is disabled while a create request is pending", async () => {
     let release!: (r: ApiResult<WorkspaceInfo>) => void;
     const b = bridge({
-      depsList: vi.fn(async () => allReady),
       createLocalWorkspace: vi.fn(() => new Promise<ApiResult<WorkspaceInfo>>((r) => (release = r))),
     });
     render(<Picker state={state} />);
     const local = await screen.findByTestId("local-block");
     fireEvent.click(local.querySelector(":scope > button")!);
-    await waitFor(() => expect(b.depsList).toHaveBeenCalled());
-    await waitFor(() => expect((screen.getByTestId("deps-continue") as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByTestId("deps-continue"));
+    await waitFor(() => expect(b.preflight).toHaveBeenCalled());
     fireEvent.change(screen.getByPlaceholderText("my-workspace"), { target: { value: "x" } });
     fireEvent.click(screen.getByText("Create workspace"));
     await screen.findByText("Creating…");
@@ -211,77 +191,45 @@ describe("guided create", () => {
     render(<Picker state={state} />);
     const local = await screen.findByTestId("local-block");
     fireEvent.click(local.querySelector(":scope > button")!);
-    await waitFor(() => expect(b.depsList).toHaveBeenCalled());
+    await waitFor(() => expect(b.preflight).toHaveBeenCalled());
   }
 
-  it("lists every dependency; nothing installs until the user clicks, and the plan is shown first", async () => {
+  it("opens straight on the name step: no Dependencies step, no install UI, no engine wording", async () => {
     const b = bridge();
     await openWizard(b);
-    await screen.findByTestId("dep-podman");
-    const plan = screen.getByTestId("dep-podman-plan").textContent ?? "";
-    expect(plan).toContain("https://x/podman");
-    expect(plan).toContain("1.0 MB");
-    expect(plan).toContain("sha256 abc");
-    expect(b.depsInstall).not.toHaveBeenCalled();
-    expect((screen.getByTestId("deps-continue") as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.click(screen.getByTestId("dep-podman-install"));
-    await waitFor(() => expect(b.depsInstall).toHaveBeenCalledWith("podman", true));
+    await screen.findByLabelText("Workspace name");
+    const text = document.body.textContent ?? "";
+    expect(text).not.toMatch(/Dependenc|Step 1|Step 2|podman|install/i);
+    expect(screen.queryByTestId("deps")).toBeNull();
+    expect(screen.queryByTestId("deps-continue")).toBeNull();
+    expect(screen.queryByTestId("preflight-blocked")).toBeNull();
   });
 
-  it("Re-check click reruns the probe immediately, independent of the poll timer", async () => {
-    const b = bridge();
+  it("a failed preflight shows its plain message and blocks Create", async () => {
+    const b = bridge({ preflight: vi.fn(async (): Promise<PreflightResult> => ({ ok: false, code: "low_disk", message: "Not enough free disk space. Free up 4 GB and try again." })) });
     await openWizard(b);
-    await screen.findByTestId("dep-podman");
-    await waitFor(() => expect((screen.getByTestId("deps-recheck") as HTMLButtonElement).disabled).toBe(false));
-    const calls = b.depsList.mock.calls.length;
-    b.depsList.mockResolvedValue(allReady);
-    fireEvent.click(screen.getByTestId("deps-recheck"));
-    await waitFor(() => expect(b.depsList.mock.calls.length).toBe(calls + 1));
-    await waitFor(() => expect(screen.getByTestId("dep-podman").getAttribute("data-state")).toBe("installed"));
-    expect((screen.getByTestId("deps-continue") as HTMLButtonElement).disabled).toBe(false);
+    expect((await screen.findByTestId("preflight-blocked")).textContent).toBe("Not enough free disk space. Free up 4 GB and try again.");
+    fireEvent.change(screen.getByLabelText("Workspace name"), { target: { value: "box" } });
+    expect((screen.getByText("Create workspace") as HTMLButtonElement).disabled).toBe(true);
+    expect(b.createLocalWorkspace).not.toHaveBeenCalled();
   });
 
-  it("flips missing -> installing -> installed on its own and only then enables Continue", async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    try {
-      const b = bridge();
-      await openWizard(b);
-      await screen.findByTestId("dep-podman");
-      expect(screen.getByTestId("dep-podman").getAttribute("data-state")).toBe("missing");
-      b.depsList.mockResolvedValue(snapOf("installed", "installing", { items: [item("podman", "installing", { progress: 40 }), item("machine", "missing", { plan: undefined })] }));
-      await vi.advanceTimersByTimeAsync(3100);
-      await waitFor(() => expect(screen.getByTestId("dep-podman").getAttribute("data-state")).toBe("installing"));
-      expect(screen.getByTestId("dep-podman-state").textContent).toContain("40%");
-      b.depsList.mockResolvedValue(allReady);
-      await vi.advanceTimersByTimeAsync(3100);
-      await waitFor(() => expect(screen.getByTestId("dep-podman").getAttribute("data-state")).toBe("installed"));
-      expect((screen.getByTestId("deps-continue") as HTMLButtonElement).disabled).toBe(false);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("a failed install shows the error and a Retry; Continue stays disabled", async () => {
-    const b = bridge({ depsList: vi.fn(async () => snapOf("installed", "failed", { items: [item("podman", "failed", { error: "checksum mismatch" }), item("machine", "missing", { plan: undefined })], ready: false })) });
+  it("Check again re-runs the preflight and enables Create without losing the typed name", async () => {
+    const pre = vi.fn(async (): Promise<PreflightResult> => ({ ok: false, code: "low_disk", message: "Not enough free disk space. Free up 4 GB and try again." }));
+    const b = bridge({ preflight: pre });
     await openWizard(b);
-    expect((await screen.findByTestId("dep-podman-error")).textContent).toContain("checksum mismatch");
-    expect(screen.getByText("Retry")).toBeTruthy();
-    expect((screen.getByTestId("deps-continue") as HTMLButtonElement).disabled).toBe(true);
-  });
-
-  it("an interrupted install is explained; an unsupported platform offers no install", async () => {
-    const b = bridge({ depsList: vi.fn(async () => ({ ...snapOf("missing", "missing"), supported: false, platform: "win32", interrupted: "podman" as DepId, items: [item("podman", "missing", { plan: undefined })], ready: false })) });
-    await openWizard(b);
-    await screen.findByTestId("deps-interrupted");
-    expect(screen.getByTestId("deps-unsupported").textContent).toContain("untested");
-    expect(screen.queryByTestId("dep-podman-install")).toBeNull();
+    await screen.findByTestId("preflight-blocked");
+    fireEvent.change(screen.getByLabelText("Workspace name"), { target: { value: "keepme" } });
+    pre.mockResolvedValue({ ok: true });
+    fireEvent.click(screen.getByTestId("preflight-recheck"));
+    await waitFor(() => expect(screen.queryByTestId("preflight-blocked")).toBeNull());
+    expect((screen.getByLabelText("Workspace name") as HTMLInputElement).value).toBe("keepme");
+    expect((screen.getByText("Create workspace") as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("creates a local workspace through the bridge with the typed name", async () => {
-    const b = bridge({ depsList: vi.fn(async () => allReady) });
+    const b = bridge();
     await openWizard(b);
-    await waitFor(() => expect((screen.getByTestId("deps-continue") as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByTestId("deps-continue"));
     fireEvent.change(screen.getByLabelText("Workspace name"), { target: { value: "  box1 " } });
     fireEvent.click(screen.getByText("Create workspace"));
     await waitFor(() => expect(b.createLocalWorkspace).toHaveBeenCalledWith("box1"));
@@ -291,12 +239,9 @@ describe("guided create", () => {
 
   it.each(["plan_limit_local_workspaces", "plan_limit_workspaces"])("a 402 %s shows the limit modal", async (code) => {
     const b = bridge({
-      depsList: vi.fn(async () => allReady),
       createLocalWorkspace: vi.fn(async () => ({ ok: false, status: 402, code, limit: 2, error: "cap" })),
     });
     await openWizard(b);
-    await waitFor(() => expect((screen.getByTestId("deps-continue") as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByTestId("deps-continue"));
     fireEvent.change(screen.getByLabelText("Workspace name"), { target: { value: "box3" } });
     fireEvent.click(screen.getByText("Create workspace"));
     await screen.findByText("You've hit your free-tier limit");

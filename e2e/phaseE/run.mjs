@@ -12,9 +12,8 @@ const NAME1 = "e2e-one", NAME2 = "e2e-two";
 
 async function createWorkspace(p, name) {
   await p.getByRole("button", { name: /Create new (workspace|sandbox)/ }).first().click();
-  await p.locator('[data-testid="deps-continue"]').waitFor();
-  await p.waitForFunction(() => !document.querySelector('[data-testid="deps-continue"]').disabled);
-  await p.locator('[data-testid="deps-continue"]').click();
+  // No Dependencies step: the wizard opens straight on the name field (silent preflight).
+  await p.locator("#sandbox-name").waitFor();
   await p.fill("#sandbox-name", name);
   await p.locator(".modal button.primary").click();
   return adopt(name);

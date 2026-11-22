@@ -1,5 +1,4 @@
-import { Dependencies } from "./Dependencies";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AccountInfo,
   ApiResult,
@@ -429,11 +428,25 @@ function CreateWizard({
   onLimit: (limit?: number) => void;
   onCreated: () => void;
 }) {
-  const [step, setStep] = useState<"runtime" | "name">("runtime");
-  const [depsReady, setDepsReady] = useState(false);
+  const [blocked, setBlocked] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Silent preflight: no step, no list. Only a failure is ever shown, in plain words.
+  const live = useRef(true);
+  const check = useCallback(() => {
+    window.aw
+      .preflight()
+      .then((r) => live.current && setBlocked(r.ok ? null : r.message ?? "This Mac can't run local workspaces."))
+      .catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    live.current = true;
+    check();
+    return () => {
+      live.current = false;
+    };
+  }, [check]);
   async function create() {
     setBusy(true);
     setError(null);
@@ -447,42 +460,34 @@ function CreateWizard({
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
       <div className="card modal">
-        {step === "runtime" ? (
-          <>
-            <span className="dim">Step 1 of 2: Dependencies</span>
-            <strong>Set up what your workspace needs</strong>
-            <span className="dim">
-              A local workspace needs a few things on this Mac. Nothing is installed until you approve it. This list
-              updates on its own.
-            </span>
-            <Dependencies onReady={setDepsReady} />
-            <button className="primary" disabled={!depsReady} data-testid="deps-continue" onClick={() => setStep("name")}>
-              Continue
-            </button>
-          </>
-        ) : (
-          <>
-            <span className="dim">Step 2 of 2: Name your workspace</span>
-            <strong>Create a new workspace</strong>
-            <span className="dim">
-              Give it a name. It'll run locally on this machine. You can invite teammates once it's created.
-            </span>
-            <label className="dim" htmlFor="sandbox-name">
-              Workspace name
-            </label>
-            <input
-              id="sandbox-name"
-              value={name}
-              autoFocus
-              onChange={(e) => setName(e.target.value)}
-              placeholder="my-workspace"
-            />
-            {error && <span className="error">{error}</span>}
-            <button className="primary" disabled={busy || !name.trim()} onClick={() => void create()}>
-              {busy ? "Creating…" : "Create workspace"}
-            </button>
-          </>
+        <strong>Create a new workspace</strong>
+        <span className="dim">
+          Give it a name. It'll run locally on this machine. You can invite teammates once it's created.
+        </span>
+        <label className="dim" htmlFor="sandbox-name">
+          Workspace name
+        </label>
+        <input
+          id="sandbox-name"
+          value={name}
+          autoFocus
+          onChange={(e) => setName(e.target.value)}
+          placeholder="my-workspace"
+        />
+        {blocked && (
+          <span className="error" role="alert" data-testid="preflight-blocked">
+            {blocked}
+          </span>
         )}
+        {blocked && (
+          <button className="link" data-testid="preflight-recheck" onClick={check}>
+            Check again
+          </button>
+        )}
+        {error && <span className="error">{error}</span>}
+        <button className="primary" disabled={busy || !!blocked || !name.trim()} onClick={() => void create()}>
+          {busy ? "Creating…" : "Create workspace"}
+        </button>
         <button className="link" disabled={busy} onClick={onClose}>
           Cancel
         </button>

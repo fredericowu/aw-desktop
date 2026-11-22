@@ -8,11 +8,9 @@ import { registerProtocolHandler, startGoogleSignInHandoff } from "./oauth";
 import { createAuthWindow, createShellWindow } from "./windows";
 import { checkForUpdates } from "./updater";
 import { guardedOpen, persistSessionSafely } from "./safeOpen";
-import { probeRuntimes } from "./runtimeProbe";
+import { preflight } from "./preflight";
 import { LocalWorkspaces, identityPublicKey } from "./localWorkspaces";
 import { LocalLimitReachedError } from "./localRegistry";
-import { depsInstall, depsSnapshot, initDeps } from "./depsRuntime";
-import type { DepId } from "../shared/deps";
 import { openIfCurrent, SessionScope, type SessionHandle, SetupSlot, scopedExclusive } from "./localBootstrap";
 import { advance, complete, fail, startProgress } from "../shared/bootstrapState";
 import { LOCAL_PLACEMENT } from "../shared/workspaces";
@@ -317,20 +315,8 @@ function registerIpcHandlers(): void {
     }
   });
 
-  ipcMain.handle("aw:checkRuntime", () => probeRuntimes());
-
-  // Dependencies screen: probe is the source of truth; installs run only on an explicit approval.
-  initDeps(() => {
-    for (const w of BrowserWindow.getAllWindows()) {
-      try {
-        w.webContents.send("aw:deps-changed");
-      } catch {
-        // window gone
-      }
-    }
-  });
-  ipcMain.handle("aw:depsList", () => depsSnapshot());
-  ipcMain.handle("aw:depsInstall", (_e, id: DepId, approved: boolean) => depsInstall(id, approved === true));
+  // Silent preflight: the wizard asks on open, and create re-checks here so a UI bypass cannot start a VM.
+  ipcMain.handle("aw:preflight", () => preflight());
 
   ipcMain.handle("aw:getBootstrapProgress", () => bootstrapProgress);
 
@@ -344,6 +330,10 @@ function registerIpcHandlers(): void {
     // Bound to the session at IPC entry, before any await.
     return scopedExclusive<ApiResult<WorkspaceInfo>>(setupSlot, sessionScope, BUSY, async (scope, handOff) => {
       try {
+        const pre = await preflight();
+        // Sign-out can land while the probe runs: never create a registry row for a dead session.
+        if (!scope.isCurrent()) return { ok: false, error: "session_lost" };
+        if (!pre.ok) return { ok: false, error: pre.message, code: pre.code };
         const ws = await local.registry.create(sub, name);
         const row = local_row(ws.id);
         if (!scope.isCurrent()) return { ok: true, data: row };
