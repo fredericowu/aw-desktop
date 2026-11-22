@@ -57,7 +57,12 @@ export function Dependencies({ onReady }: { onReady: (ready: boolean) => void })
           <DepRow key={it.id} it={it} blocked={it.after?.some((a) => snap.items.find((x) => x.id === a)?.state !== "installed") ?? false} onChanged={() => void refresh()} />
         ))}
       </ul>
-      <span className="dim" data-testid="deps-live">{checking ? "Checking…" : "Checking every 3 seconds."}</span>
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <button className="secondary" disabled={checking} data-testid="deps-recheck" onClick={() => void refresh()}>
+          Re-check
+        </button>
+        <span className="dim" data-testid="deps-live">{checking ? "Checking…" : "Also checking every 3 seconds."}</span>
+      </div>
     </div>
   );
 }
