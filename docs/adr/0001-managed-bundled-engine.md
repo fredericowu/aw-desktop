@@ -178,18 +178,26 @@ Product Owner accepting the core and apps contract change as scope.
        removal, runs inside the existing setup slot (`src/main/index.ts:35`)
        and sets a per-workspace `recreating` flag. The supervisor, the wake
        hook and every IPC lifecycle action read the flag and return "busy"
-       without touching the engine. A second re-create is refused the same way.
+       without touching the engine. A second re-create is refused the same way. Quit is included: the
+       `before-quit` hook (`src/main/index.ts:472-477`) calls `stopAll()`
+       directly today, so it is changed to await the guarded operation. When
+       `recreating` is set it waits until removal completes or the guard
+       aborts and finishes its cleanup, and only then stops the workspaces
+       and exits. It never stops the VM under the guard.
      - (b) The three containers are stopped by the quiesce above, so the core
        can no longer create containers or volumes. Any other container fails
        check 2.
      - (c) After the quiesce, the app closes the engine API: it stops the
-       engine's socket and service units inside the VM (`systemctl stop
-       podman.socket podman.service`, run over the app's own `machine ssh`)
+       engine's rootless socket and service units inside the VM (`systemctl
+       --user stop podman.socket podman.service`, run as the VM's podman user
+       over the app's own `machine ssh`; the API socket is
+       `/run/user/$(id -u)/podman/podman.sock`, `src/main/localRuntime.ts:356-359`,
+       so system units are the wrong target)
        and removes the forwarded host socket. All later reads in the proof go
        through the in-VM CLI over `machine ssh`, which talks to the local
        store and not to the API socket. Fence verification, all of which must
-       pass: a connection to the host socket is refused; the units report
-       inactive; no process other than the app's own ssh session is using the
+       pass: a connection to the host socket is refused; the same user units
+       report inactive (`systemctl --user is-active`); no process other than the app's own ssh session is using the
        engine. If any of these cannot be shown, refuse and leave the VM
        running. A client that already held an open connection when the units
        stop is dropped with the service; the event check below catches
@@ -202,8 +210,12 @@ Product Owner accepting the core and apps contract change as scope.
        removal command starts only after that pass returns, with nothing else
        allowed to run in between, and the VM is never restarted between the
        fence and removal. If removal does not start, the app reopens the
-       engine units and restarts the workspace, so a refusal leaves the VM as
+       same user units and restarts the workspace, so a refusal leaves the VM as
        it was.
+     Writers in scope are (a), (b) and (c) above. A writer that logs in to the
+     VM over ssh and runs the in-VM CLI is out of scope: that CLI reads the
+     local store directly, so closing the API does not stop it, and no
+     point-in-time check can exclude it between the final read and removal.
      The residual that this does not close is someone with the machine's ssh
      key who logs in and mutates the VM by hand during the window. The key
      sits in the app-private `HOME`; the guard accepts that residual and says
@@ -420,8 +432,12 @@ change.
   at each of four points: after the first volume listing, after the second,
   after the final pass and immediately before the removal command, and during
   the quiesce. The mutations are `podman volume create` and `podman run`
-  through the host socket, the same through the in-VM CLI, a Start click, the
-  wake hook and a supervisor recovery tick. For every injection the invariant
+  through the host socket, the same
+  from inside a container, a Start click, the wake hook, a supervisor
+  recovery tick and Quit. Injection through a hand-opened in-VM ssh session
+  is not in the matrix: it is the accepted residual of check 7, except that
+  one injected before the fence must be caught by the passes and the event
+  check. For every injection the invariant
   is: no named volume or container exists at removal that was absent from the
   proven inventory. Pass means either the mutation is refused (socket
   refused, "busy") and the action completes with nothing lost, or the action
