@@ -157,9 +157,26 @@ Product Owner accepting the core and apps contract change as scope.
      lands that allowlist, the answer is "unproven", so the action stays
      refused.
   5. The checks run in one pass immediately before the confirmation, and
-     again after the user confirms. The workspace is stopped before the first
-     pass so nothing writes in between. If the inventory changed between the
-     two passes, refuse.
+     again after the user confirms. Before the first pass the app quiesces the
+     workspace with a new operation that stops only the three containers
+     (`podman stop`) and leaves the VM and its engine running. The existing
+     workspace stop path cannot be used: it also stops the VM
+     (`src/main/localRuntime.ts:484-489`), after which the engine cannot be
+     asked and the guard would refuse every workspace. The container
+     inventory in checks 2 and 4 lists all states (`podman ps -a`), so a
+     stopped or exited extra container still counts. If the inventory changed
+     between the two passes, refuse.
+  6. The removal itself is a new VM-only operation, not the existing Remove
+     path. Remove deletes the workspace data dirs and unregisters the
+     workspace (`src/main/localRuntime.ts:500-549`,
+     `src/main/localWorkspaces.ts:106`), which would destroy exactly the data
+     checks 1 to 4 say is safe. The VM-only operation removes the machine and
+     its machine config dirs under the workspace's podman `HOME` and nothing
+     else: the registry entry, the data dir and the workspace dir stay. It
+     then creates a fresh VM and restarts the workspace. Its successful-path
+     test seeds representative files in the Postgres, Redis and workspace
+     bind-mount dirs and asserts, after the re-create, that the files are
+     byte-identical and the registry entry is unchanged.
 
   The guard does not outlive the VM it describes. Removing the VM discards the
   evidence, so the proof is taken from the live VM that is about to be
@@ -336,10 +353,12 @@ Acceptance checks for the set:
 Acceptance per card. Each is a pass/fail check a reviewer can run on the merged
 change.
 
-- Card 1 (phaseE guard): with the host VM stopped before a run, the run exits
-  non-zero with a host-integrity message, with and without `--teardown`. A
-  run that leaves host state unchanged passes. The harness env test asserts
-  podman is called with only the four variables the app uses.
+- Card 1 (phaseE guard): simulate a host VM that is running in the before
+  snapshot and stopped in the after snapshot. The run exits non-zero with a
+  host-integrity message, with and without `--teardown`. A run with identical
+  before and after host state passes, including when the host VM is stopped
+  throughout. The harness env test asserts podman is called with only the
+  four variables the app uses.
 - Card 2 (bundle): the signed, notarized build boots a VM on a clean Mac with
   no `~/podman-dist`. A Mac with existing per-workspace VMs starts them with
   the bundled binaries and the same engine version. `~/podman-dist` is
@@ -352,8 +371,9 @@ change.
   specific wrong message. Raw stderr goes to the diagnostics log only.
 - Card 5 (supervisor): the three recovery scenarios in the set-level checks
   pass, and Remove during recovery does not race it.
-- Card 6 (guards, prune, re-create): the five re-create checks above each have
-  a test where that check alone fails and the action is refused. "Free up
+- Card 6 (guards, prune, re-create): the re-create checks 1 to 5 above each
+  have a test where that check alone fails and the action is refused. The
+  VM-only removal (6) has the data-survival test described there. "Free up
   space" removes images only; a test with a named volume present shows the
   volume survives. The `podman diff` allowlist is written down from a
   measured run.
