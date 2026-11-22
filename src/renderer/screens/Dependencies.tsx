@@ -44,7 +44,7 @@ export function Dependencies({ onReady }: { onReady: (ready: boolean) => void })
     <div data-testid="deps">
       {!snap.supported && (
         <span className="error" data-testid="deps-unsupported">
-          Setting up a local sandbox from here is only available on Apple Silicon Macs right now. {snap.platform === "win32" ? "Windows is not implemented yet (untested)." : ""}
+          Setting up a local workspace from here is only available on Apple Silicon Macs right now. {snap.platform === "win32" ? "Windows is not implemented yet (untested)." : ""}
         </span>
       )}
       {snap.interrupted && (

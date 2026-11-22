@@ -45,7 +45,7 @@ export function Picker({ state }: { state: AuthState }) {
     if (res.ok && res.data) {
       setLoad({ phase: "ready", workspaces: res.data.workspaces, account: res.data.account });
     } else {
-      setLoad({ phase: "error", message: res.error ?? "Could not load your sandboxes." });
+      setLoad({ phase: "error", message: res.error ?? "Could not load your workspaces." });
     }
   }, []);
 
@@ -75,7 +75,7 @@ export function Picker({ state }: { state: AuthState }) {
         <span className="chevron">❯</span> aw
       </div>
       <div className="picker-head">
-        <strong>Your sandboxes</strong>
+        <strong>Your workspaces</strong>
         <span className="dim">Choose one to open, or create a new one.</span>
       </div>
 
@@ -99,7 +99,7 @@ export function Picker({ state }: { state: AuthState }) {
       {load.phase === "loading" && (
         <div className="picker-loading">
           <div className="spinner" />
-          <span className="dim">Loading your sandboxes…</span>
+          <span className="dim">Loading your workspaces…</span>
         </div>
       )}
 
@@ -132,7 +132,7 @@ export function Picker({ state }: { state: AuthState }) {
               </span>
             </div>
             {local.length === 0 ? (
-              <span className="dim">No local sandboxes yet — create one to get started.</span>
+              <span className="dim">No local workspaces yet — create one to get started.</span>
             ) : (
               <div className="workspace-list">
                 {local.map((ws) => (
@@ -150,7 +150,7 @@ export function Picker({ state }: { state: AuthState }) {
             )}
             {notice && <span className="error" data-testid="local-notice">{notice}</span>}
             <button className="secondary" onClick={onCreateLocal}>
-              + Create new sandbox
+              + Create new workspace
             </button>
           </section>
 
@@ -163,7 +163,7 @@ export function Picker({ state }: { state: AuthState }) {
               <span className="badge muted">Coming soon</span>
             </div>
             {cloud.length === 0 ? (
-              <span className="dim">No cloud sandboxes yet.</span>
+              <span className="dim">No cloud workspaces yet.</span>
             ) : (
               <div className="workspace-list">
                 {cloud.map((ws) => (
@@ -174,7 +174,7 @@ export function Picker({ state }: { state: AuthState }) {
             {/* Truly disabled: no onClick, so the Cloud path can never reach
                 the API. */}
             <button className="secondary" disabled aria-describedby="cloud-caption">
-              + Create new sandbox
+              + Create new workspace
             </button>
             <span id="cloud-caption" className="dim" data-testid="cloud-caption">
               {CLOUD_UNAVAILABLE}
@@ -265,7 +265,7 @@ function ProgressModal({
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true" data-testid="bootstrap-progress">
       <div className="card modal">
-        <strong>{failed ? "Setup failed" : progress.phase === "done" ? "Your sandbox is ready" : `Setting up ${progress.slug}`}</strong>
+        <strong>{failed ? "Setup failed" : progress.phase === "done" ? "Your workspace is ready" : `Setting up ${progress.slug}`}</strong>
         <ul className="runtime-list">
           {STEP_ORDER.map((id) => {
             const state = failed && progress.failedStep === id ? "failed" : progress.done.includes(id) ? "done" : progress.step === id ? "active" : "pending";
@@ -313,7 +313,7 @@ function LimitModal({ limit, onClose }: { limit: number; onClose: () => void }) 
       <div className="card modal">
         <strong>You've hit your free-tier limit</strong>
         <span className="dim">
-          Your plan includes {limit} local sandboxes and you've used them all. Remove one, or upgrade to
+          Your plan includes {limit} local workspaces and you've used them all. Remove one, or upgrade to
           create more.
         </span>
         <button className="primary" onClick={onClose}>
@@ -345,7 +345,7 @@ function CreateWizard({
     setBusy(false);
     if (res.ok) return onCreated();
     if (res.status === 402 && isPlanLimitCode(res.code)) return onLimit(res.limit);
-    setError(res.error ?? "Could not create the sandbox.");
+    setError(res.error ?? "Could not create the workspace.");
   }
 
   return (
@@ -354,9 +354,9 @@ function CreateWizard({
         {step === "runtime" ? (
           <>
             <span className="dim">Step 1 of 2 — Dependencies</span>
-            <strong>Set up what your sandbox needs</strong>
+            <strong>Set up what your workspace needs</strong>
             <span className="dim">
-              A local sandbox needs a few things on this Mac. Nothing is installed until you approve it. This list
+              A local workspace needs a few things on this Mac. Nothing is installed until you approve it. This list
               updates on its own.
             </span>
             <Dependencies onReady={setDepsReady} />
@@ -366,24 +366,24 @@ function CreateWizard({
           </>
         ) : (
           <>
-            <span className="dim">Step 2 of 2 — Name your sandbox</span>
-            <strong>Create a new sandbox</strong>
+            <span className="dim">Step 2 of 2 — Name your workspace</span>
+            <strong>Create a new workspace</strong>
             <span className="dim">
               Give it a name — it'll run locally on this machine. You can invite teammates once it's created.
             </span>
             <label className="dim" htmlFor="sandbox-name">
-              Sandbox name
+              Workspace name
             </label>
             <input
               id="sandbox-name"
               value={name}
               autoFocus
               onChange={(e) => setName(e.target.value)}
-              placeholder="my-sandbox"
+              placeholder="my-workspace"
             />
             {error && <span className="error">{error}</span>}
             <button className="primary" disabled={busy || !name.trim()} onClick={() => void create()}>
-              {busy ? "Creating…" : "Create sandbox"}
+              {busy ? "Creating…" : "Create workspace"}
             </button>
           </>
         )}
