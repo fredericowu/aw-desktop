@@ -87,9 +87,13 @@ unnotarized app on another machine).
 ## Bundling the workspace UI
 
 `npm run dist` / the release workflow bundle the workspace UI via
-`scripts/fetch-ui.sh`, which shallow-clones the **public**
-`fredericowu/aw-workspace-ui` anonymously (no token, no secret). Set
-`AW_UI_SRC=/path/to/aw-workspace-ui` to reuse a local checkout, or
+`scripts/fetch-ui.sh`, which fetches the **public**
+`fredericowu/aw-workspace-ui` anonymously (no token, no secret) at the **pinned
+full commit SHA in `scripts/ui-ref`** (the script fails if it is missing or
+malformed), so a tag determines the bundled UI. Bump the ref with a PR when the
+desktop needs a newer UI. The script also writes `build-info.json` into the
+packaged resources (desktop commit, tag, UI commit, workflow run id). Set
+`AW_UI_SRC=/path/to/aw-workspace-ui` to reuse a local checkout (skips the pin), or
 `AW_UI_REPO_TOKEN` only if you point it at a private fork.
 
 ## E2E harness (packaged app, macOS)
@@ -137,9 +141,8 @@ both platforms to one GitHub Release per tag:
 4. The tag push fires both jobs: `release-macos` (macOS 15 runner, dmg +
    zip) then `release-windows` (windows-latest runner, nsis installer),
    serialized so they don't race creating the same Release. Each publishes
-   straight to the GitHub Release for that tag — unconditionally, even
-   without signing secrets configured, so every tag push produces real,
-   downloadable artifacts.
+   to the GitHub Release for that tag as a **prerelease** (not Latest, so
+   the auto-updater does not offer it yet).
 5. `workflow_dispatch` re-runs the same thing manually against whatever
    tag/ref you pick, useful for retrying a failed publish without a new
    version.
@@ -149,6 +152,22 @@ workflow does not read or enforce the version itself (electron-builder
 takes it from `package.json`), so a tag that doesn't match `package.json`
 will still build and publish, just under a misleading Release name/file
 version. Never reuse a tag; cut a new patch version instead.
+
+### Promoting a release (explicit, manual)
+
+Releases are created as prereleases. Verify the signed build on a Mac
+(asset SHA-256 vs GitHub digest and `latest-mac.yml`, `stapler validate`,
+`spctl`, Team ID, installed `build-info.json`, signed-to-signed upgrade with no
+Keychain prompt), then promote:
+
+```bash
+gh release edit vX.Y.Z --prerelease=false --latest
+```
+
+Rollback: `gh release edit vPREV --latest` and
+`gh release edit vX.Y.Z --prerelease`. This stops the updater offering vX.Y.Z;
+never delete or replace assets. Clients already on vX.Y.Z are not downgraded;
+ship a forward fix.
 
 **Signing status:** until Apple (`CSC_LINK`/`CSC_KEY_PASSWORD`,
 `ASC_KEY_ID`/`ASC_ISSUER_ID`/`ASC_KEY_CONTENT_B64`/`APPLE_TEAM_ID`) and
