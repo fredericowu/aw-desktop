@@ -14,6 +14,11 @@ const run = (cmd, args, env = {}) => { try { return { code: 0, out: execFileSync
 const registry = () => (existsSync(REGISTRY) ? JSON.parse(readFileSync(REGISTRY, "utf8")) : { version: 1, workspaces: [] });
 const dirs = (root, re) => (existsSync(root) ? readdirSync(root).filter((d) => re.test(d)) : []);
 const podmanEnv = (id) => ({ HOME: join(HOMES, id, "home"), TMPDIR: join("/tmp", `aw-${id}`) });
+// Query podman as workspace <id>. All of that workspace's podman state lives under its own HOME, so
+// once that dir is gone there is nothing to ask: running podman anyway only errors (the error text
+// was being read as container/network names) and re-creates /tmp/aw-<id>/storage-run-<uid> as a
+// side effect, which then shows up as a leftover caused by the check itself.
+const podmanFor = (id, args) => (existsSync(podmanEnv(id).HOME) ? run(PODMAN, args, podmanEnv(id)) : { code: 0, out: "" });
 
 export async function teardown() {
   const ids = new Set([...registry().workspaces.map((w) => w.id), ...dirs(HOMES, /^local/), ...dirs(DATA, /^local/)]);
@@ -29,9 +34,9 @@ export async function teardown() {
 
 /** Everything one workspace id owns on this Mac (empty/false fields mean it is fully gone). */
 export function wsState(id, ports = []) {
-  const machines = run(PODMAN, ["machine", "list", "--format", "{{.Name}}"], podmanEnv(id)).out.split("\n").map((l) => l.trim().replace(/\*$/, "")).filter((n) => n === `aw-${id}`);
-  const ctrs = run(PODMAN, ["ps", "-a", "--format", "{{.Names}}"], podmanEnv(id)).out.split("\n").map((l) => l.trim()).filter(Boolean);
-  const nets = run(PODMAN, ["network", "ls", "--format", "{{.Name}}"], podmanEnv(id)).out.split("\n").map((l) => l.trim()).filter((n) => n && n !== "podman");
+  const machines = podmanFor(id, ["machine", "list", "--format", "{{.Name}}"]).out.split("\n").map((l) => l.trim().replace(/\*$/, "")).filter((n) => n === `aw-${id}`);
+  const ctrs = podmanFor(id, ["ps", "-a", "--format", "{{.Names}}"]).out.split("\n").map((l) => l.trim()).filter(Boolean);
+  const nets = podmanFor(id, ["network", "ls", "--format", "{{.Name}}"]).out.split("\n").map((l) => l.trim()).filter((n) => n && n !== "podman");
   const procs = run("pgrep", ["-fl", `aw-${id}`]).out.split("\n").filter((l) => l.includes(`aw-${id}`) && !l.includes("pgrep"));
   const dirsLeft = [join(HOMES, id), join(DATA, id), join("/tmp", `aw-${id}`)].filter((d) => existsSync(d));
   const listening = ports.filter((p) => run("lsof", ["-nP", `-iTCP:${p}`, "-sTCP:LISTEN"]).out.trim() !== "");
@@ -43,7 +48,7 @@ export async function leftovers() {
   const ids = [...new Set([...dirs(HOMES, /^local/), ...registry().workspaces.map((w) => w.id)])];
   const machines = [];
   for (const id of ids) {
-    const r = run(PODMAN, ["machine", "list", "--format", "{{.Name}}"], podmanEnv(id));
+    const r = podmanFor(id, ["machine", "list", "--format", "{{.Name}}"]);
     machines.push(...r.out.split("\n").map((l) => l.trim().replace(/\*$/, "")).filter((n) => n.startsWith("aw-local")));
   }
   const ctrs = run("pgrep", ["-fl", "aw-local"]).out.split("\n").filter((l) => l.includes("aw-local") && !l.includes("pgrep"));
