@@ -27,6 +27,18 @@ export async function teardown() {
   writeFileSync(REGISTRY, JSON.stringify({ ...registry(), workspaces: [] }, null, 2));
 }
 
+/** Everything one workspace id owns on this Mac (empty/false fields mean it is fully gone). */
+export function wsState(id, ports = []) {
+  const machines = run(PODMAN, ["machine", "list", "--format", "{{.Name}}"], podmanEnv(id)).out.split("\n").map((l) => l.trim().replace(/\*$/, "")).filter((n) => n === `aw-${id}`);
+  const ctrs = run(PODMAN, ["ps", "-a", "--format", "{{.Names}}"], podmanEnv(id)).out.split("\n").map((l) => l.trim()).filter(Boolean);
+  const nets = run(PODMAN, ["network", "ls", "--format", "{{.Name}}"], podmanEnv(id)).out.split("\n").map((l) => l.trim()).filter((n) => n && n !== "podman");
+  const procs = run("pgrep", ["-fl", `aw-${id}`]).out.split("\n").filter((l) => l.includes(`aw-${id}`) && !l.includes("pgrep"));
+  const dirsLeft = [join(HOMES, id), join(DATA, id), join("/tmp", `aw-${id}`)].filter((d) => existsSync(d));
+  const listening = ports.filter((p) => run("lsof", ["-nP", `-iTCP:${p}`, "-sTCP:LISTEN"]).out.trim() !== "");
+  return { machines, ctrs, nets, procs, dirsLeft, listening, inRegistry: registry().workspaces.some((w) => w.id === id) };
+}
+export const registryWorkspaces = () => registry().workspaces;
+
 export async function leftovers() {
   const ids = [...new Set([...dirs(HOMES, /^local/), ...registry().workspaces.map((w) => w.id)])];
   const machines = [];

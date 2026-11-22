@@ -4,7 +4,7 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { launch, pickerWindow, waitShell, snap, jwt, log, rec, summary, files, keychainItem, UD, sleep, switchWorkspace } from "./common.mjs";
-import { teardown, leftovers } from "./teardown.mjs";
+import { teardown, leftovers, wsState, registryWorkspaces } from "./teardown.mjs";
 
 const DO_TEARDOWN = process.argv.includes("--teardown");
 const PORT1 = 9031, PORT2 = 9033;
@@ -83,6 +83,48 @@ const dialogs = await page.locator(".modal").allInnerTexts();
 rec("s6: third create is refused by the free-tier cap, wizard not shown", /free-tier limit/i.test(dialogs.join(" ")) && (await page.locator("#sandbox-name").count()) === 0);
 await snap(page, "s6-cap-refused");
 await page.getByText("Got it").click().catch(() => {});
+
+// ---- Step 7: Remove button, for real (workspace 2 of 2) ----
+const regBefore = registryWorkspaces();
+const ws2 = regBefore.find((w) => w.name === NAME2);
+const ws1 = regBefore.find((w) => w.name === NAME1);
+rec("s7: registry has both workspaces before removal", regBefore.length === 2 && !!ws1 && !!ws2, regBefore.map((w) => `${w.name}:${w.id}:${w.uiPort}`).join(","));
+const before = wsState(ws2.id, [ws2.uiPort, ws2.apiPort]);
+rec("s7: workspace 2 resources exist before removal (machine, dirs, port)", before.machines.length === 1 && before.dirsLeft.length > 0 && before.listening.length > 0, JSON.stringify(before));
+await page.locator(`[data-testid^="remove-"][aria-label="Remove ${NAME2}"]`).click();
+await page.locator('[data-testid="remove-modal"]').waitFor({ timeout: 10000 });
+await snap(page, "s7-remove-confirm");
+await page.locator('[data-testid="remove-confirm"]').click();
+await page.locator('[data-testid="remove-modal"]').waitFor({ state: "detached", timeout: 180000 }).catch(() => {});
+await sleep(2500);
+await snap(page, "s7-after-remove");
+rec("s7: remove modal closed without an error", (await page.locator('[data-testid="remove-error"]').count()) === 0 && (await page.locator('[data-testid="remove-modal"]').count()) === 0);
+rec("s7: picker counter went 2/2 -> 1/2", (await page.locator('[data-testid="local-badge"]').innerText()) === "1/2");
+rec("s7: removed workspace no longer listed, the other still is", (await page.locator(`[data-testid="remove-${ws2.name}"]`).count()) === 0 && (await page.locator(`[aria-label="Remove ${NAME1}"]`).count()) === 1);
+const after = wsState(ws2.id, [ws2.uiPort, ws2.apiPort]);
+rec("s7: podman machine gone", after.machines.length === 0, after.machines.join(","));
+rec("s7: containers and network gone", after.ctrs.length === 0 && after.nets.length === 0 && after.procs.length === 0, JSON.stringify({ ctrs: after.ctrs, nets: after.nets, procs: after.procs }));
+rec("s7: home/data/tmp dirs gone", after.dirsLeft.length === 0, after.dirsLeft.join(","));
+rec("s7: ports freed", after.listening.length === 0, after.listening.join(","));
+rec("s7: registry entry gone", !after.inRegistry);
+const keep = wsState(ws1.id, [ws1.uiPort]);
+rec("s7: the other workspace untouched (machine and port still up)", keep.machines.length === 1 && keep.listening.length === 1, JSON.stringify({ m: keep.machines, l: keep.listening }));
+
+// ---- Step 8: create again after removal ----
+const NAME3 = "e2e-three";
+await createWorkspace(page, NAME3);
+const ws3port = (() => { const w = registryWorkspaces().find((x) => x.name === NAME3); return w?.uiPort; })();
+const s3 = await waitShell(app, ws3port ?? PORT2, 120);
+await s3.waitForLoadState("load").catch(() => {});
+rec("s8: re-created workspace healthy after a removal", (await api(s3, "/api/health")).status === 200, `port ${ws3port}`);
+await snap(s3, "s8-shell3");
+await switchWorkspace(app);
+await sleep(2500);
+page = await pickerWindow(app);
+await page.bringToFront();
+await page.waitForSelector('[data-testid="local-block"]');
+rec("s8: picker shows 2/2 again", (await page.locator('[data-testid="local-badge"]').innerText()) === "2/2");
+await snap(page, "s8-picker");
 
 await app.close();
 const ok = summary();

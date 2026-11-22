@@ -59,6 +59,14 @@ and run `node drive.mjs <up|stop|destroy> <root> <id> <apiPort> <uiPort> <uiDir>
 - Picker shows `1/2`, then `e2e-two` comes up healthy on `9033`, picker shows `2/2`.
 - A third create is refused with the free-tier limit dialog and no wizard.
 
+**Step 7, Remove button**
+- Remove `e2e-two` through the confirm modal: counter 2/2 -> 1/2, its podman
+  machine, containers, network, dirs, registry entry gone, its ports freed, and
+  `e2e-one` untouched.
+
+**Step 8, re-create after removal**
+- A new workspace comes up healthy and the picker is back to 2/2.
+
 **Teardown and leftovers** (`teardown.mjs`; assertions only with `--teardown`)
 - No `aw-local*` podman machines.
 - No `aw-local*` containers/processes.
@@ -68,8 +76,8 @@ and run `node drive.mjs <up|stop|destroy> <root> <id> <apiPort> <uiPort> <uiDir>
 
 ## Known gaps (not fixed by this harness)
 
-1. **No in-app way to remove a local workspace.** Teardown deletes machines,
-   dirs and the registry entries directly.
+1. Teardown still deletes machines, dirs and registry entries directly as a
+   safety net; step 7 exercises the real in-app Remove button.
 2. **Keychain re-prompt on ad-hoc re-install.** Re-installing an ad-hoc signed
    build changes the code identity, so macOS asks for Keychain access again.
 3. **Local Network settings panel stays on "Loading…" in standalone** (a
