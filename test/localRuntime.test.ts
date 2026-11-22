@@ -267,6 +267,19 @@ describe("destroy (full cleanup)", () => {
     expect(h.removed).toHaveLength(3);
   });
 
+  it("podman unusable and no machine artifacts on disk (bootstrap died before any VM): dirs removed", async () => {
+    const h = harness(() => ({ code: 1, stdout: "", stderr: "spawn /missing/podman ENOENT" }));
+    await h.rt.destroy("localaaa");
+    expect(h.calls.every((c) => c.args[0] === "machine" && c.args[1] === "list")).toBe(true);
+    expect(h.removed).toHaveLength(3);
+  });
+
+  it("podman unusable but machine artifacts exist (VM uncertain): throws and keeps every dir", async () => {
+    const h = harness(() => ({ code: 1, stdout: "", stderr: "spawn /missing/podman ENOENT" }), false);
+    await expect(h.rt.destroy("localaaa")).rejects.toThrow(/machine list/);
+    expect(h.removed).toEqual([]);
+  });
+
   it("keeps the dirs when the machine will not go, so a retry can finish", async () => {
     const h = harness(); // default handler: the machine always still exists
     await expect(h.rt.destroy("localaaa")).rejects.toThrow(/could not remove machine/);
