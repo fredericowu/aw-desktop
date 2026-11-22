@@ -34,7 +34,7 @@ export function plansFor(env: Env): Record<DepId, DepPlan | undefined> {
           source: podmanPkgUrl("arm64"),
           size: mb(PODMAN_PKG_BYTES.arm64),
           checksum: `sha256 ${PODMAN_PKG_SHA256.arm64}`,
-          dest: "~/podman-dist/podman (unpacked in your home folder; no admin password, no Homebrew)",
+          dest: "inside the AW Desktop app (bundled; nothing is written to your home folder)",
           needsAdmin: false,
         }
       : undefined,
@@ -100,7 +100,7 @@ export function verifySha256(buf: Uint8Array, expected: string, what: string): v
 export interface InstallOps {
   /** Download (reporting progress) -> bytes. */
   download(url: string, onProgress: (pct: number) => void): Promise<Uint8Array>;
-  /** Expand the pkg without admin and copy its podman dir under ~/podman-dist. */
+  /** Unused at runtime: the engine is bundled in the app, so the real implementation only reports it missing. */
   unpackPodmanPkg(pkg: Uint8Array): Promise<void>;
 }
 

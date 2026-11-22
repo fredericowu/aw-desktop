@@ -1,11 +1,14 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
+import { join } from "node:path";
 import type { RuntimeCheck, RuntimeKind, RuntimeStatus } from "../shared/types";
 
 /** Injectable side effects so the probe is unit-testable off a Mac. */
 export interface ProbeDeps {
   home: string;
+  /** The engine bundled inside the app (bin/podman). Never ~/podman-dist. */
+  engineDir: string;
   exists(path: string): boolean;
   /** Resolves the exit code (null on spawn failure / timeout). */
   run(file: string, args: string[], timeoutMs: number): Promise<number | null>;
@@ -16,15 +19,14 @@ const PROBE_TIMEOUT_MS = 8000;
 /** Absolute paths only. A Finder/Dock-launched Electron app does NOT inherit
  * the login-shell PATH, so a bare `podman` would report "missing" for a
  * perfectly good Homebrew install. */
-export function candidatePaths(kind: RuntimeKind, home: string): string[] {
+export function candidatePaths(kind: RuntimeKind, home: string, engineDir = ""): string[] {
   switch (kind) {
     case "podman":
       return [
+        ...(engineDir ? [`${engineDir}/bin/podman`] : []),
         "/opt/homebrew/bin/podman",
         "/usr/local/bin/podman",
         "/opt/podman/bin/podman",
-        // Vendored by aw-remote-host's bootstrap/podman/install.sh (no brew).
-        `${home}/podman-dist/podman/bin/podman`,
       ];
     case "docker-desktop":
       return [
@@ -53,7 +55,7 @@ function runningArgs(kind: RuntimeKind): string[] {
 }
 
 async function probeOne(kind: RuntimeKind, deps: ProbeDeps): Promise<RuntimeStatus> {
-  const path = candidatePaths(kind, deps.home).find((p) => deps.exists(p));
+  const path = candidatePaths(kind, deps.home, deps.engineDir).find((p) => deps.exists(p));
   const bundleInstalled =
     kind === "docker-desktop" && DOCKER_APP_BUNDLES(deps.home).some((p) => deps.exists(p));
   // Docker Desktop needs the .app bundle; a lone /usr/local/bin/docker is not
@@ -75,6 +77,7 @@ export async function probeRuntimes(deps: ProbeDeps = defaultDeps()): Promise<Ru
 export function defaultDeps(): ProbeDeps {
   return {
     home: homedir(),
+    engineDir: process.env["AW_DESKTOP_ENGINE_DIR"] || join(process.resourcesPath ?? "", "engine"),
     exists: (p) => existsSync(p),
     run: (file, args, timeoutMs) =>
       new Promise((resolve) => {

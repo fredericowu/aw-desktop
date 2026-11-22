@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Fetch the pinned container engine into resources/engine (bundled by electron-builder as
+# <Resources>/engine, mac only). Layout kept as upstream: bin/ (podman gvproxy vfkit krunkit),
+# lib/ (libkrun and friends, found by krunkit through @rpath ../lib), share/krunkit (EFI firmware).
+# The pkg is verified against the sha256 in scripts/engine-ref before anything is unpacked.
+# podman-mac-helper is NOT shipped: it installs a privileged socket the app never uses.
+# Must run on macOS (pkgutil). Dev shortcut: AW_ENGINE_PKG=/path/to/podman-installer-macos-arm64.pkg
+# uses a local copy (still checked against the pin).
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+out="$root/resources/engine"
+# shellcheck disable=SC1091
+. "$root/scripts/engine-ref"
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "fetch-engine: bad VERSION in scripts/engine-ref" >&2; exit 1; }
+[[ "$ARM64_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "fetch-engine: bad ARM64_SHA256 in scripts/engine-ref" >&2; exit 1; }
+[ "$(uname -s)" = "Darwin" ] || { echo "fetch-engine: needs macOS (pkgutil)" >&2; exit 1; }
+work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+pkg="$work/podman.pkg"
+if [ -n "${AW_ENGINE_PKG:-}" ]; then cp "$AW_ENGINE_PKG" "$pkg"; else
+  curl -fsSL --retry 3 -o "$pkg" "https://github.com/containers/podman/releases/download/v${VERSION}/podman-installer-macos-arm64.pkg"
+fi
+actual="$(shasum -a 256 "$pkg" | cut -d' ' -f1)"
+[ "$actual" = "$ARM64_SHA256" ] || { echo "fetch-engine: checksum mismatch: expected $ARM64_SHA256, got $actual" >&2; exit 1; }
+pkgutil --expand-full "$pkg" "$work/x"
+src="$(find "$work/x" -type d -name podman -path '*Payload*' -print -quit)"
+[ -n "$src" ] && [ -x "$src/bin/podman" ] || { echo "fetch-engine: no podman payload in the pkg" >&2; exit 1; }
+rm -rf "$out"; mkdir -p "$out/bin" "$out/lib" "$out/share"
+for b in podman gvproxy vfkit krunkit; do
+  [ -f "$src/bin/$b" ] || { echo "fetch-engine: missing bin/$b in the pkg" >&2; exit 1; }
+  cp "$src/bin/$b" "$out/bin/$b"
+done
+cp "$src"/lib/*.dylib "$out/lib/"
+cp -R "$src/share/krunkit" "$out/share/krunkit"
+chmod -R u+rwX "$out"
+find "$out" -name '._*' -delete
+"$out/bin/podman" --version | grep -q "$VERSION" || { echo "fetch-engine: bundled podman is not $VERSION" >&2; exit 1; }
+printf '%s\n' "$VERSION" > "$out/ENGINE_VERSION"
+echo "fetch-engine: bundled engine $VERSION at $out"

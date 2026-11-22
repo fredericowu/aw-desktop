@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 
 const [cmd, root, id, api, ui, uiDir, keyFile] = process.argv.slice(2);
-const podman = process.env.AW_E2E_PODMAN ?? join(process.env.HOME ?? "", "podman-dist", "podman", "bin", "podman");
+const podman = process.env.AW_E2E_PODMAN ?? join(process.env.AW_DESKTOP_ENGINE_DIR ?? "/Applications/AW Desktop.app/Contents/Resources/engine", "bin", "podman");
 const rt = new LocalRuntime({
   podmanPath: podman,
   homesRoot: join(root, "local-runtimes"),

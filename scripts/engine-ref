@@ -1,0 +1,5 @@
+# Pinned container engine, read by scripts/fetch-engine.sh. The sha256 is pinned HERE, not
+# fetched next to the file it guards. Only an arm64 pkg exists for this release (Intel Macs
+# are unsupported). Keep the version equal to what existing VMs were created with.
+VERSION=6.0.2
+ARM64_SHA256=5a1d97f98f626cdb82dbd9932cf43102d1e9b6621627085fec2dcadf59743930

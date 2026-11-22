@@ -5,6 +5,7 @@ function deps(existing: string[], exitCodes: Record<string, number | null> = {})
   const calls: string[] = [];
   return {
     home: "/Users/u",
+    engineDir: "/Applications/AW Desktop.app/Contents/Resources/engine",
     calls,
     exists: (p) => existing.includes(p),
     run: async (file, args) => {
@@ -44,8 +45,8 @@ describe("probeRuntimes", () => {
     expect(after.ready).toBe(true);
   });
 
-  it("finds the vendored podman under the home dir", async () => {
-    const p = "/Users/u/podman-dist/podman/bin/podman";
+  it("finds the bundled podman inside the app, not under ~/podman-dist", async () => {
+    const p = "/Applications/AW Desktop.app/Contents/Resources/engine/bin/podman";
     const res = await probeRuntimes(deps([p], { [p]: 0 }));
     expect(res.runtimes.find((r) => r.kind === "podman")).toMatchObject({ installed: true, running: true, path: p });
   });
