@@ -22,6 +22,13 @@ done
 ent "$e/bin/vfkit" | grep -q "com.apple.security.virtualization" || bad "vfkit lacks com.apple.security.virtualization"
 ent "$e/bin/krunkit" | grep -q "com.apple.security.hypervisor" || bad "krunkit lacks com.apple.security.hypervisor"
 ent "$e/bin/krunkit" | grep -q "com.apple.security.cs.disable-library-validation" || bad "krunkit lacks disable-library-validation"
+# Every non-system dependency of an engine binary must resolve inside the bundle, never to Homebrew.
+otool -l "$e/bin/krunkit" | grep -q "@executable_path/../lib" || bad "krunkit has no bundle-relative rpath"
+[ "$(otool -l "$e/bin/krunkit" | grep -c 'cmd LC_RPATH')" = 1 ] || bad "krunkit must have only the bundle's rpath (Homebrew's would be searched first)"
+for p in "$e"/bin/* "$e"/lib/*.dylib; do
+  [ -f "$p" ] || continue
+  otool -L "$p" | tail -n +2 | awk '{print $1}' | grep -E "^/(opt|usr/local)/" && bad "${p#"$e"/} links outside the bundle"
+done
 codesign --verify --deep --strict "$app" || bad "app deep verify failed"
 if [ "${2:-}" = "--notarized" ]; then
   xcrun stapler validate "$app" || bad "app not stapled"

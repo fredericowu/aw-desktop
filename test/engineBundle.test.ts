@@ -37,4 +37,9 @@ describe("bundled engine pin", () => {
     expect(wf.indexOf("scripts/fetch-engine.sh")).toBeLessThan(wf.indexOf("electron-builder --mac"));
     expect(wf).toContain("build/verify-engine-signing.sh");
   });
+
+  it("krunkit gets a bundle-relative rpath, because its upstream rpaths only point at Homebrew", () => {
+    expect(read("scripts/fetch-engine.sh")).toContain('-delete_rpath /opt/homebrew/lib -delete_rpath /opt/podman/lib -add_rpath "@executable_path/../lib"');
+    expect(read("build/verify-engine-signing.sh")).toContain("@executable_path/../lib");
+  });
 });
