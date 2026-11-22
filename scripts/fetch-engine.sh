@@ -29,10 +29,23 @@ for b in podman gvproxy vfkit krunkit; do
   [ -f "$src/bin/$b" ] || { echo "fetch-engine: missing bin/$b in the pkg" >&2; exit 1; }
   cp "$src/bin/$b" "$out/bin/$b"
 done
+# gvproxy: the pkg's copy is v0.8.9 (CVE-2026-107935). Use the pinned patched release instead.
+[[ "$GVPROXY_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] && [[ "$GVPROXY_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "fetch-engine: bad GVPROXY pin in scripts/engine-ref" >&2; exit 1; }
+curl -fsSL --retry 3 -o "$work/gvproxy" "https://github.com/containers/gvisor-tap-vsock/releases/download/${GVPROXY_VERSION}/gvproxy-darwin"
+gv="$(shasum -a 256 "$work/gvproxy" | cut -d' ' -f1)"
+[ "$gv" = "$GVPROXY_SHA256" ] || { echo "fetch-engine: gvproxy checksum mismatch: expected $GVPROXY_SHA256, got $gv" >&2; exit 1; }
+cp "$work/gvproxy" "$out/bin/gvproxy"
 cp "$src"/lib/*.dylib "$out/lib/"
 cp -R "$src/share/krunkit" "$out/share/krunkit"
 chmod -R u+rwX "$out"
 find "$out" -name '._*' -delete
+# krunkit's upstream LC_RPATHs are /opt/homebrew/lib and /opt/podman/lib only, so it would load libkrun
+# from Homebrew (or fail on a Mac without it) instead of from this bundle. Rpaths are searched in order, so
+# drop both and leave only the bundle-relative one. This invalidates the upstream signature; electron-builder re-signs it (hardened, our identity).
+install_name_tool -delete_rpath /opt/homebrew/lib -delete_rpath /opt/podman/lib -add_rpath "@executable_path/../lib" "$out/bin/krunkit" 2>/dev/null
+[ "$(otool -l "$out/bin/krunkit" | grep -c 'cmd LC_RPATH')" = 1 ] || { echo "fetch-engine: krunkit must have exactly one rpath" >&2; exit 1; }
+otool -l "$out/bin/krunkit" | grep -q "@executable_path/../lib" || { echo "fetch-engine: krunkit rpath not added" >&2; exit 1; }
+"$out/bin/gvproxy" -version 2>&1 | grep -q "${GVPROXY_VERSION#v}" || { echo "fetch-engine: bundled gvproxy is not $GVPROXY_VERSION" >&2; exit 1; }
 "$out/bin/podman" --version | grep -q "$VERSION" || { echo "fetch-engine: bundled podman is not $VERSION" >&2; exit 1; }
 printf '%s\n' "$VERSION" > "$out/ENGINE_VERSION"
 echo "fetch-engine: bundled engine $VERSION at $out"

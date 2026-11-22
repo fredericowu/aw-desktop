@@ -102,3 +102,10 @@ and run `node drive.mjs <up|stop|destroy> <root> <id> <apiPort> <uiPort> <uiDir>
    build changes the code identity, so macOS asks for Keychain access again.
 3. **Local Network settings panel stays on "Loading…" in standalone** (a
    local workspace has no host to answer it).
+
+## Existing-workspace engine check (`driveExisting.ts`)
+
+Starts an already-registered local workspace with the real `LocalRuntime` and the engine bundled in
+a given app copy (`AW_DESKTOP_ENGINE_DIR=<app>/Contents/Resources/engine`), using the workspace's
+real `~/.awd` and `~/aw-workspaces`. It never touches the host's own podman machine or `:9030`. Use
+it to prove a VM created by an older engine still starts with the bundled one.

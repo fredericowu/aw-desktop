@@ -65,6 +65,24 @@ function harness(handler: (args: string[]) => RunResult | undefined = () => unde
   return { rt, calls, files, dirs, removed };
 }
 
+describe("machineStart stale sockets", () => {
+  it("removes this workspace's leftover gvproxy/api/machine sockets, and only those, before `machine start`", async () => {
+    const order: string[] = [];
+    const fs: FsOps = { mkdirp() {}, writeFile() {}, readFile: () => null, isEmptyDir: () => true, rmrf: (p) => void order.push(`rm ${p}`) };
+    const rt = new LocalRuntime({ ...cfg, tmpRoot: "/tmp" }, {
+      fs,
+      run: async (_c, args) => { order.push(args.join(" ")); return ok(); },
+    });
+    await rt.machineStart("localaaa");
+    expect(order).toEqual([
+      "rm /tmp/aw-localaaa/podman/aw-localaaa-gvproxy.sock",
+      "rm /tmp/aw-localaaa/podman/aw-localaaa-api.sock",
+      "rm /tmp/aw-localaaa/podman/aw-localaaa.sock",
+      "machine start aw-localaaa",
+    ]);
+  });
+});
+
 describe("env isolation", () => {
   it("per-workspace HOME, short TMPDIR and provider; nothing inherited", () => {
     const a = podmanEnv(cfg, "localaaa");

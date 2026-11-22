@@ -11,8 +11,8 @@ ent() { codesign -d --entitlements - --xml "$1" 2>/dev/null || true; }
 for f in bin/podman bin/gvproxy bin/vfkit bin/krunkit lib/libkrun.dylib lib/libvirglrenderer.1.dylib lib/libepoxy.0.dylib lib/libMoltenVK.dylib share/krunkit/KRUN_EFI.silent.fd; do
   [ -f "$e/$f" ] || bad "missing $f"
 done
-for f in bin/podman bin/gvproxy bin/vfkit bin/krunkit lib/*.dylib; do
-  p="$e/$f"; [ -f "$p" ] || continue
+for p in "$e"/bin/podman "$e"/bin/gvproxy "$e"/bin/vfkit "$e"/bin/krunkit "$e"/lib/*.dylib; do
+  [ -f "$p" ] || continue; f="${p#"$e"/}"
   d="$(codesign -dvv "$p" 2>&1)" || { bad "$f not signed"; continue; }
   echo "$d" | grep -q "Authority=Developer ID Application" || bad "$f: not Developer ID signed"
   echo "$d" | grep -Eq "flags=0x[0-9a-f]+\(.*runtime" || bad "$f: hardened runtime off"
@@ -22,6 +22,14 @@ done
 ent "$e/bin/vfkit" | grep -q "com.apple.security.virtualization" || bad "vfkit lacks com.apple.security.virtualization"
 ent "$e/bin/krunkit" | grep -q "com.apple.security.hypervisor" || bad "krunkit lacks com.apple.security.hypervisor"
 ent "$e/bin/krunkit" | grep -q "com.apple.security.cs.disable-library-validation" || bad "krunkit lacks disable-library-validation"
+# Every non-system dependency of an engine binary must resolve inside the bundle, never to Homebrew.
+otool -l "$e/bin/krunkit" | grep -q "@executable_path/../lib" || bad "krunkit has no bundle-relative rpath"
+[ "$(otool -l "$e/bin/krunkit" | grep -c 'cmd LC_RPATH')" = 1 ] || bad "krunkit must have only the bundle's rpath (Homebrew's would be searched first)"
+for p in "$e"/bin/* "$e"/lib/*.dylib; do
+  [ -f "$p" ] || continue
+  deps="$(otool -L "$p")" || { bad "${p#"$e"/}: otool could not inspect it"; continue; }
+  echo "$deps" | tail -n +2 | awk '{print $1}' | grep -E "^/(opt|usr/local)/" && bad "${p#"$e"/} links outside the bundle"
+done
 codesign --verify --deep --strict "$app" || bad "app deep verify failed"
 if [ "${2:-}" = "--notarized" ]; then
   xcrun stapler validate "$app" || bad "app not stapled"

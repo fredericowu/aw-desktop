@@ -346,7 +346,13 @@ export class LocalRuntime {
     await this.machineCmd(id, machineInitArgs(this.cfg, id), 600_000);
   }
   async machineStart(id: string): Promise<void> {
-    this.prepare(id); // /tmp is wiped on reboot: TMPDIR must exist at every start
+    const p = this.prepare(id); // /tmp is wiped on reboot: TMPDIR must exist at every start
+    // gvproxy >= 0.9.0 no longer removes a leftover socket before listening, so a socket left by a
+    // killed or crashed VM (or by an older gvproxy's stop) makes `machine start` fail with "unable to
+    // connect to gvproxy socket". Callers only reach here when the VM is not running; the dir is this
+    // workspace's own TMPDIR, so only its own sockets are touched.
+    const n = machineName(id);
+    for (const sock of [`${n}-gvproxy.sock`, `${n}-api.sock`, `${n}.sock`]) this.fs.rmrf(join(p.tmp, "podman", sock));
     await this.machineCmd(id, ["machine", "start", machineName(id)], 300_000);
   }
   async machineStop(id: string): Promise<void> {
