@@ -193,7 +193,7 @@ const diagnosticsFile = (): string => join(app.getPath("userData"), "diagnostics
 /** Raw detail goes to the log; the caller gets plain copy only. */
 function logFailure(context: string, err: unknown): ClassifiedError {
   const c = classifyError(err);
-  appendDiagnostic(diagnosticsFile(), { context, code: c.code, raw: c.raw });
+  appendDiagnostic(diagnosticsFile(), { context, code: c.code, raw: c.raw, account: currentSub() ?? "" });
   return c;
 }
 
@@ -212,7 +212,7 @@ function apiFailure<T>(err: unknown, fallback: string): ApiResult<T> {
 
 const ACTION_COPY: Record<string, string> = {
   create_failed: "Couldn't create the workspace. Try again, or copy details for support.",
-  remove_failed: "Couldn't remove the workspace. Try again, or copy details for support.",
+  remove_failed: "Couldn't remove the workspace. Try again.",
 };
 
 function emitBootstrap(p: BootstrapProgress, isCurrent: () => boolean = () => true): void {
@@ -347,7 +347,7 @@ function registerIpcHandlers(): void {
 
   // "Copy details": the raw log never goes to the renderer, main puts it on the clipboard.
   ipcMain.handle("aw:copyDiagnostics", () => {
-    const tail = readDiagnosticTail(diagnosticsFile());
+    const tail = readDiagnosticTail(diagnosticsFile(), currentSub() ?? "");
     if (!tail) return false;
     clipboard.writeText(tail);
     return true;

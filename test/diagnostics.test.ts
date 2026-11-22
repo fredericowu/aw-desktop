@@ -1,33 +1,62 @@
-import { mkdtempSync, readFileSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { MAX_LOG_BYTES, appendDiagnostic, readDiagnosticTail } from "../src/main/diagnostics";
+import { MAX_ENTRY_BYTES, MAX_LOG_BYTES, appendDiagnostic, readDiagnosticTail } from "../src/main/diagnostics";
 
 const tmp = () => join(mkdtempSync(join(tmpdir(), "awd-diag-")), "sub", "diagnostics.log");
 
 describe("diagnostics log", () => {
   it("writes raw detail with context, code and timestamp, redacting tokens", () => {
     const f = tmp();
-    appendDiagnostic(f, { context: "start_local", code: "start_failed", raw: "podman failed token awlk_SECRET123 x" }, new Date("2026-01-02T03:04:05Z"));
+    appendDiagnostic(f, { context: "start_local", code: "start_failed", raw: "podman failed token awlk_SECRET123 x", account: "a" }, new Date("2026-01-02T03:04:05Z"));
     const s = readFileSync(f, "utf8");
     expect(s).toContain("[2026-01-02T03:04:05.000Z] start_local code=start_failed");
     expect(s).toContain("podman failed");
     expect(s).not.toContain("SECRET123");
   });
 
-  it("rotates once past the size cap", () => {
+  it("redacts database credentials from engine commands and URLs", () => {
     const f = tmp();
-    appendDiagnostic(f, { context: "a", code: "x", raw: "first" });
-    writeFileSync(f, "x".repeat(MAX_LOG_BYTES + 1));
-    appendDiagnostic(f, { context: "b", code: "y", raw: "second" });
+    appendDiagnostic(f, {
+      context: "c", code: "start_failed", account: "a",
+      raw: "Command failed: podman run -e POSTGRES_PASSWORD=hunter2pw -e FOO=bar postgres\nDATABASE_URL=postgresql://aw:hunter2pw@db:5432/aw api_key: abc123",
+    });
+    const s = readFileSync(f, "utf8");
+    expect(s).not.toContain("hunter2pw");
+    expect(s).not.toContain("abc123");
+    expect(s).toContain("FOO=bar");
+  });
+
+  it("a single huge entry is bounded and the file stays under the limit", () => {
+    const f = tmp();
+    appendDiagnostic(f, { context: "a", code: "x", account: "a", raw: "y".repeat(1024 * 1024) });
+    expect(statSync(f).size).toBeLessThan(MAX_ENTRY_BYTES + 512);
+    for (let i = 0; i < 100; i++) appendDiagnostic(f, { context: "a", code: "x", account: "a", raw: "z".repeat(MAX_ENTRY_BYTES) });
+    expect(statSync(f).size).toBeLessThanOrEqual(MAX_LOG_BYTES);
     expect(existsSync(`${f}.1`)).toBe(true);
-    expect(readFileSync(f, "utf8")).toContain("second");
-    expect(readFileSync(f, "utf8")).not.toContain("xxxx");
+  });
+
+  it("Copy details returns only the active account's recent entries", () => {
+    const f = tmp();
+    appendDiagnostic(f, { context: "a", code: "x", account: "alice", raw: "alice-failure" });
+    appendDiagnostic(f, { context: "b", code: "y", account: "bob", raw: "bob-failure" });
+    const bob = readDiagnosticTail(f, "bob");
+    expect(bob).toContain("bob-failure");
+    expect(bob).not.toContain("alice-failure");
+    expect(readDiagnosticTail(f, "carol")).toBe("");
+  });
+
+  it("tail read is bounded for a large file", () => {
+    const f = tmp();
+    for (let i = 0; i < 20; i++) appendDiagnostic(f, { context: "a", code: "x", account: "a", raw: `n${i}-` + "q".repeat(MAX_ENTRY_BYTES - 100) });
+    const t = readDiagnosticTail(f, "a");
+    expect(Buffer.byteLength(t)).toBeLessThanOrEqual(64 * 1024);
+    expect(t).toContain("n19-");
   });
 
   it("tail is empty when there is no log and never throws", () => {
-    expect(readDiagnosticTail("/nonexistent/dir/diagnostics.log")).toBe("");
-    expect(() => appendDiagnostic("/proc/nope/x.log", { context: "c", code: "d", raw: "e" })).not.toThrow();
+    expect(readDiagnosticTail("/nonexistent/dir/diagnostics.log", "a")).toBe("");
+    expect(() => appendDiagnostic("/proc/nope/x.log", { context: "c", code: "d", raw: "e", account: "a" })).not.toThrow();
   });
 });
