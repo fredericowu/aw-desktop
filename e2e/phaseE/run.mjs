@@ -25,9 +25,13 @@ const api = (s, path, init) => s.evaluate(async ([u, o]) => { const x = await fe
 // failed) permanently disables safeStorage, so the relaunch could never decrypt the session.
 // This touches the app's real profile (UD defaults to the installed app's userData), so it is
 // opt-in (AW_E2E_RESET_AUTH=1) and MOVES the files to a timestamped backup dir instead of deleting
-// them. Point AW_E2E_USER_DATA at a throwaway dir to avoid touching a real session at all.
-const AUTH_FILES = ["session.bin", "session.json", "safestorage-disabled", "safestorage-attempt"];
+// them. The app is launched with --user-data-dir=<UD>, so the harness and Electron always share one
+// profile. Point AW_E2E_USER_DATA at a throwaway dir to avoid touching a real session at all.
+// session.json is the legacy PLAINTEXT token: it is never copied into a backup. If one exists the
+// run refuses to reset and asks for an isolated profile instead.
+const AUTH_FILES = ["session.bin", "safestorage-disabled", "safestorage-attempt"];
 if (process.env.AW_E2E_RESET_AUTH === "1") {
+  if (existsSync(join(UD, "session.json"))) throw new Error(`${join(UD, "session.json")} holds a plaintext session token; refusing to back it up or delete it. Use an isolated AW_E2E_USER_DATA dir.`);
   const present = AUTH_FILES.filter((f) => existsSync(join(UD, f)));
   if (present.length) {
     const bak = join(UD, `e2e-auth-backup-${Date.now()}`);
