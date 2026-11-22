@@ -36,6 +36,7 @@ function bridge(over: Partial<AwBridge> & { workspaces?: WorkspaceInfo[]; localC
       emitProgress = cb;
       return () => undefined;
     }),
+    copyDiagnostics: vi.fn(async () => true),
     logout: vi.fn(async () => undefined),
     ...rest,
   };
@@ -121,8 +122,8 @@ describe("Picker landing", () => {
     expect(b.finishLocalSetup).toHaveBeenCalledWith("mine");
   });
 
-  it("bootstrap failure shows the failing step and last log lines, with Retry", async () => {
-    const b = bridge();
+  it("bootstrap failure shows plain copy only, Copy details and Retry", async () => {
+    const b = bridge({ copyDiagnostics: vi.fn(async () => true) });
     render(<Picker state={state} />);
     await screen.findByTestId("local-block");
     emitProgress({
@@ -131,15 +132,28 @@ describe("Picker landing", () => {
       step: "image",
       done: ["machine"],
       failedStep: "image",
-      error: "exited with code 1",
-      lines: ["podman: FAILED", "machine init error"],
+      error: "Couldn't download the workspace. Check your connection and try again.",
+      errorCode: "download_failed",
+      lines: [],
     });
     const err = await screen.findByTestId("bootstrap-error");
-    expect(err.textContent).toContain("Download the workspace image");
-    expect(screen.getByTestId("bootstrap-log").textContent).toContain("machine init error");
-    expect(screen.getByTestId("step-image").getAttribute("data-state")).toBe("failed");
+    expect(err.textContent).toContain("Couldn't download the workspace");
+    expect(screen.queryByTestId("bootstrap-log")).toBeNull();
+    fireEvent.click(screen.getByTestId("copy-details"));
+    await screen.findByText("Copied.");
+    expect(b.copyDiagnostics).toHaveBeenCalled();
     fireEvent.click(screen.getByText("Retry"));
     expect(b.finishLocalSetup).toHaveBeenCalledWith("mine");
+  });
+
+  it("running progress collapses to two plain phases", async () => {
+    bridge();
+    render(<Picker state={state} />);
+    await screen.findByTestId("local-block");
+    emitProgress({ slug: "mine", phase: "running", step: "image", done: ["machine"], lines: [] });
+    expect((await screen.findByTestId("bootstrap-phase")).textContent).toBe("Preparing your workspace");
+    emitProgress({ slug: "mine", phase: "running", step: "redis", done: ["machine", "image", "postgres"], lines: [] });
+    await waitFor(() => expect(screen.getByTestId("bootstrap-phase").textContent).toBe("Starting workspace"));
   });
 
   it("at the cap, Create shows the limit modal with no preflight or create", async () => {

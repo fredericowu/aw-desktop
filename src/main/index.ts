@@ -1,4 +1,5 @@
-import { app, ipcMain, powerMonitor, BrowserWindow, Menu } from "electron";
+import { join } from "node:path";
+import { app, clipboard, ipcMain, powerMonitor, BrowserWindow, Menu } from "electron";
 import { APEX, CONSOLE_BASE, workspaceUrl } from "./config";
 import * as api from "./apiClient";
 import { ApiError } from "./apiClient";
@@ -9,6 +10,9 @@ import { createAuthWindow, createShellWindow } from "./windows";
 import { checkForUpdates } from "./updater";
 import { guardedOpen, persistSessionSafely } from "./safeOpen";
 import { preflight } from "./preflight";
+import { classifyError, looksLikeEngineText, type ClassifiedError } from "./errorClassifier";
+import { appendDiagnostic, readDiagnosticTail } from "./diagnostics";
+import { PodmanCommandError } from "./localRuntime";
 import { LocalWorkspaces, identityPublicKey } from "./localWorkspaces";
 import { LocalLimitReachedError } from "./localRegistry";
 import { openIfCurrent, SessionScope, type SessionHandle, SetupSlot, scopedExclusive } from "./localBootstrap";
@@ -184,12 +188,32 @@ function handleAuthSuccess(token: string, user: AwUser): { ok: true; user: AwUse
   return { ok: true, user };
 }
 
+const diagnosticsFile = (): string => join(app.getPath("userData"), "diagnostics.log");
+
+/** Raw detail goes to the log; the caller gets plain copy only. */
+function logFailure(context: string, err: unknown): ClassifiedError {
+  const c = classifyError(err);
+  appendDiagnostic(diagnosticsFile(), { context, code: c.code, raw: c.raw });
+  return c;
+}
+
 function apiFailure<T>(err: unknown, fallback: string): ApiResult<T> {
   if (err instanceof ApiError) {
     return { ok: false, error: err.message, code: err.code, status: err.status, limit: err.limit };
   }
-  return { ok: false, error: err instanceof Error ? err.message : fallback };
+  const msg = err instanceof Error ? err.message : fallback;
+  // Local-engine failures never surface raw text; anything else keeps its own (non-engine) message.
+  if (err instanceof PodmanCommandError || looksLikeEngineText(msg) || classifyError(err).code !== "start_failed") {
+    const c = logFailure(fallback, err);
+    return { ok: false, error: c.code === "start_failed" ? (ACTION_COPY[fallback] ?? c.message) : c.message, code: c.code };
+  }
+  return { ok: false, error: msg };
 }
+
+const ACTION_COPY: Record<string, string> = {
+  create_failed: "Couldn't create the workspace. Try again, or copy details for support.",
+  remove_failed: "Couldn't remove the workspace. Try again, or copy details for support.",
+};
 
 function emitBootstrap(p: BootstrapProgress, isCurrent: () => boolean = () => true): void {
   if (!isCurrent()) return;
@@ -217,7 +241,8 @@ async function startLocal(id: string, scope: SessionHandle): Promise<void> {
       bootstrapProgress = null;
     }
   } catch (err) {
-    emitBootstrap(fail(bootstrapProgress ?? startProgress(id), err instanceof Error ? err.message : String(err)), scope.isCurrent);
+    const c = logFailure("start_local", err);
+    emitBootstrap(fail(bootstrapProgress ?? startProgress(id), c.message, c.code), scope.isCurrent);
   } finally {
     scope.finish();
     setupSlot.release();
@@ -319,6 +344,14 @@ function registerIpcHandlers(): void {
   ipcMain.handle("aw:preflight", () => preflight());
 
   ipcMain.handle("aw:getBootstrapProgress", () => bootstrapProgress);
+
+  // "Copy details": the raw log never goes to the renderer, main puts it on the clipboard.
+  ipcMain.handle("aw:copyDiagnostics", () => {
+    const tail = readDiagnosticTail(diagnosticsFile());
+    if (!tail) return false;
+    clipboard.writeText(tail);
+    return true;
+  });
 
   const BUSY = { ok: false, error: "A setup is already running on this Mac.", code: "bootstrap_running" } as const;
 

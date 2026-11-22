@@ -1,14 +1,16 @@
 import type { BootstrapProgress, BootstrapStepId } from "./types";
+import { PHASE_LABEL, type FailureCode } from "./errorCopy";
 
 export const STEP_ORDER: BootstrapStepId[] = ["machine", "image", "postgres", "redis", "workspace", "running"];
 
+/** Internal ids stay; the user sees two phases (ADR 0001). */
 export const STEP_LABEL: Record<BootstrapStepId, string> = {
-  machine: "Start the Podman machine",
-  image: "Download the workspace image",
-  postgres: "Set up database",
-  redis: "Set up cache",
-  workspace: "Start workspace",
-  running: "Wait for workspace",
+  machine: PHASE_LABEL.preparing,
+  image: PHASE_LABEL.preparing,
+  postgres: PHASE_LABEL.starting,
+  redis: PHASE_LABEL.starting,
+  workspace: PHASE_LABEL.starting,
+  running: PHASE_LABEL.starting,
 };
 
 /** Never let a token reach a log, the renderer or the progress buffer. */
@@ -35,8 +37,8 @@ export function appendLine(p: BootstrapProgress, raw: string): BootstrapProgress
   return { ...p, lines: [...p.lines, line].slice(-MAX_LINES) };
 }
 
-export function fail(p: BootstrapProgress, error: string): BootstrapProgress {
-  return { ...p, phase: "failed", error: redact(error), failedStep: p.step ?? "machine" };
+export function fail(p: BootstrapProgress, error: string, errorCode?: FailureCode): BootstrapProgress {
+  return { ...p, phase: "failed", error: redact(error), errorCode, failedStep: p.step ?? "machine" };
 }
 
 export function complete(p: BootstrapProgress): BootstrapProgress {

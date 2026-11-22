@@ -20,6 +20,7 @@ const bridge: AwBridge = {
     ipcRenderer.on("aw:bootstrap-progress", listener);
     return () => ipcRenderer.removeListener("aw:bootstrap-progress", listener);
   },
+  copyDiagnostics: () => ipcRenderer.invoke("aw:copyDiagnostics"),
   logout: () => ipcRenderer.invoke("aw:logout"),
   onStateChanged: (cb: (state: AuthState) => void) => {
     const listener = (_event: unknown, next: AuthState) => cb(next);

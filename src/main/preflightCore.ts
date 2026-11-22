@@ -1,4 +1,5 @@
 import type { PreflightCode, PreflightResult } from "../shared/preflight";
+import { failureCopy } from "../shared/errorCopy";
 
 const GIB = 1024 ** 3;
 /** Each local workspace is one 4 GiB VM; below 8 GiB total the Mac cannot also run itself. */
@@ -23,17 +24,7 @@ export interface PreflightProbe {
   hypervisorSupported(): Promise<boolean>;
 }
 
-const msg = (code: PreflightCode, extra = ""): PreflightResult => ({
-  ok: false,
-  code,
-  message: {
-    virtualization_unavailable: "This Mac can't run local workspaces.",
-    low_disk: `Not enough free disk space. Free up ${extra} GB and try again.`,
-    low_memory: "Not enough memory to start a local workspace.",
-    engine_missing: "AW Desktop is incomplete. Reinstall it and try again.",
-    path_too_long: "This Mac's account name is too long to run local workspaces.",
-  }[code],
-});
+const msg = (code: PreflightCode, gb?: number): PreflightResult => ({ ok: false, code, message: failureCopy(code, gb) });
 
 /** Pure given a probe. First failing check wins; cheap checks run before the hypervisor query. */
 export async function runPreflight(p: PreflightProbe): Promise<PreflightResult> {
@@ -42,7 +33,7 @@ export async function runPreflight(p: PreflightProbe): Promise<PreflightResult> 
   if (Buffer.byteLength(`${p.homesRoot}/${SOCKET_SUFFIX}`) > MAX_SOCKET_PATH_BYTES) return msg("path_too_long");
   if (p.totalMemBytes < MIN_TOTAL_MEMORY_BYTES) return msg("low_memory");
   if (p.freeDiskBytes < MIN_FREE_DISK_BYTES) {
-    return msg("low_disk", String(Math.max(1, Math.ceil((MIN_FREE_DISK_BYTES - p.freeDiskBytes) / GIB))));
+    return msg("low_disk", Math.max(1, Math.ceil((MIN_FREE_DISK_BYTES - p.freeDiskBytes) / GIB)));
   }
   let hv = false;
   try {
