@@ -12,7 +12,8 @@
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p src/renderer/tsconfig.json",
     "dist": "npm run build && electron-builder --mac --publish never",
-    "test": "vitest run"
+    "test": "vitest run",
+    "e2e:phaseE": "node e2e/phaseE/run.mjs"
   },
   "dependencies": {
     "electron-updater": "^6.3.9"
