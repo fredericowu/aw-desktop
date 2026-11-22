@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -124,5 +124,26 @@ describe("LocalWorkspaces.destroy", () => {
     await lw.destroy(w.id);
     expect(registry.get(w.id)).toBeUndefined();
     for (const d of [join(cfg.dataRoot, w.id), join(cfg.homesRoot, w.id), join(cfg.tmpRoot, `aw-${w.id}`)]) expect(existsSync(d)).toBe(false);
+  });
+  it.skipIf(process.getuid?.() === 0)("keeps data and registry when a machine artifact path is unreadable (EACCES), real fs + default runner", async () => {
+    const root = mkdtempSync(join(tmpdir(), "awd-destroy-"));
+    const cfg = { podmanPath: join(root, "missing-podman"), homesRoot: join(root, ".awd"), dataRoot: join(root, "d"), tmpRoot: join(root, "t"), path: "/bin" };
+    const lw = new LocalWorkspaces(() => null, async () => undefined);
+    const registry = new LocalRegistry({ store: fileStore(join(root, "reg.json")), isPortFree: async () => true, newId: () => "localz" });
+    const runtime = new LocalRuntime(cfg);
+    Object.assign(lw, { registry, runtime });
+    const w = await registry.create("s", "Z");
+    runtime.prepare(w.id);
+    const anc = join(cfg.homesRoot, w.id, "home", ".local", "share", "containers");
+    mkdirSync(join(anc, "podman", "machine"), { recursive: true });
+    writeFileSync(join(anc, "podman", "machine", "machine.json"), "{}");
+    chmodSync(anc, 0o600);
+    try {
+      await expect(lw.destroy(w.id)).rejects.toThrow();
+      expect(registry.get(w.id)).toBeDefined();
+      for (const d of [join(cfg.dataRoot, w.id), join(cfg.homesRoot, w.id), join(cfg.tmpRoot, `aw-${w.id}`)]) expect(existsSync(d)).toBe(true);
+    } finally {
+      chmodSync(anc, 0o700);
+    }
   });
 });
