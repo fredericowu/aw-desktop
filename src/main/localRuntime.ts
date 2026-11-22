@@ -490,7 +490,7 @@ export class LocalRuntime {
    */
   async destroy(id: string): Promise<void> {
     const paths = this.ownedDirs(id);
-    if (await this.machineExists(id)) {
+    if (await this.machineKnownToExist(id)) {
       if (await this.machineRunning(id)) {
         const n = containerNames(id);
         for (const c of [n.workspace, n.redis, n.postgres]) {
@@ -510,6 +510,24 @@ export class LocalRuntime {
       if (await this.machineExists(id)) throw new Error(`could not remove machine ${machineName(id)}`);
     }
     for (const d of paths) this.fs.rmrf(d);
+  }
+
+  /**
+   * Whether `id` may own a machine. Normally asks podman; when podman cannot answer (binary
+   * missing, bootstrap died before it was usable) the answer comes from disk instead: a machine
+   * lives entirely under this workspace's own podman HOME, so no machine artifacts there means
+   * no VM was ever created. Artifacts present + podman unreachable is uncertain, so the error
+   * is rethrown and data/registry are preserved for a retry.
+   */
+  private async machineKnownToExist(id: string): Promise<boolean> {
+    try {
+      return await this.machineExists(id);
+    } catch (err) {
+      const home = workspacePaths(this.cfg, id).home;
+      const artifacts = [join(home, ".local", "share", "containers", "podman", "machine"), join(home, ".config", "containers", "podman", "machine")];
+      if (artifacts.some((d) => !this.fs.isEmptyDir(d))) throw err;
+      return false;
+    }
   }
 
   /** The directories owned by `id`, each verified to sit strictly inside its configured root. */

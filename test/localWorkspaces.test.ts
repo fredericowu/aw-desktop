@@ -112,4 +112,17 @@ describe("LocalWorkspaces.destroy", () => {
     await expect(lw.destroy(w.id)).rejects.toThrow();
     expect(registry.get(w.id)).toBeDefined();
   });
+  it("removes a workspace whose bootstrap failed before any VM (podman binary missing), real fs + default runner", async () => {
+    const root = mkdtempSync(join(tmpdir(), "awd-destroy-"));
+    const cfg = { podmanPath: join(root, "missing-podman"), homesRoot: join(root, ".awd"), dataRoot: join(root, "d"), tmpRoot: join(root, "t"), path: "/bin" };
+    const lw = new LocalWorkspaces(() => null, async () => undefined);
+    const registry = new LocalRegistry({ store: fileStore(join(root, "reg.json")), isPortFree: async () => true, newId: () => "localy" });
+    const runtime = new LocalRuntime(cfg);
+    Object.assign(lw, { registry, runtime });
+    const w = await registry.create("s", "Y");
+    runtime.prepare(w.id);
+    await lw.destroy(w.id);
+    expect(registry.get(w.id)).toBeUndefined();
+    for (const d of [join(cfg.dataRoot, w.id), join(cfg.homesRoot, w.id), join(cfg.tmpRoot, `aw-${w.id}`)]) expect(existsSync(d)).toBe(false);
+  });
 });
