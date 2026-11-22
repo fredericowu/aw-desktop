@@ -73,7 +73,7 @@ const owned = () => {
 };
 // Only a diagnostic that names THIS machine as absent counts as "already gone". A generic "not found"
 // (e.g. "vfkit helper not found in PATH") means podman could not even try, so the VM may survive.
-const machineGone = (id, out) => new RegExp(`aw-${id}\\b[^\\n]*(does not exist|no such|not found)|no such (vm|machine)[^\\n]*aw-${id}\\b`, "i").test(out);
+const machineGone = (id, out) => new RegExp(`aw-${id}\\b:?\\s+(vm |machine )?(does not exist|not found)|no such (vm|machine):?\\s+aw-${id}\\b`, "i").test(out);
 
 export async function teardown() {
   removalFailures = [];
