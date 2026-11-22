@@ -10,5 +10,17 @@
   <true/>
   <key>com.apple.security.network.client</key>
   <true/>
+  <key>com.apple.security.network.server</key>
+  <true/>
+  <!-- Bundled container engine (Resources/engine), signed with this same file.
+       vfkit: virtualization + network.server/client. krunkit: hypervisor +
+       disable-library-validation (it loads libkrun from ../lib). Both match what the upstream
+       podman 6.0.2 pkg signs them with. The VM never boots without these on a notarized build. -->
+  <key>com.apple.security.virtualization</key>
+  <true/>
+  <key>com.apple.security.hypervisor</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
 </dict>
 </plist>

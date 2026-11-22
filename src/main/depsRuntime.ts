@@ -1,13 +1,13 @@
 import { execFile } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { app } from "electron";
 import type { DepId, DepsSnapshot } from "../shared/deps";
 import { buildSnapshot, DepInstaller, type DepProbe, type InstallOps } from "./dependencies";
+import { podmanBinPath } from "./localWorkspaces";
 
 const env = () => ({ platform: process.platform, arch: process.arch });
-const podmanBin = () => join(homedir(), "podman-dist", "podman", "bin", "podman");
+const podmanBin = () => podmanBinPath();
 
 function run(file: string, args: string[], timeout = 30_000): Promise<{ code: number | null; out: string }> {
   return new Promise((resolve) =>
@@ -45,30 +45,9 @@ async function downloadWithProgress(url: string, onProgress: (p: number) => void
 
 const realOps: InstallOps = {
   download: (url, onProgress) => downloadWithProgress(url, onProgress),
-  unpackPodmanPkg: async (pkg) => {
-    const dir = mkdtempSync(join(tmpdir(), "aw-podman-"));
-    try {
-      const file = join(dir, "pkg.pkg");
-      writeFileSync(file, pkg);
-      const expanded = join(dir, "expanded");
-      const r = await run("/usr/sbin/pkgutil", ["--expand-full", file, expanded], 300_000);
-      if (r.code !== 0) throw new Error(`pkgutil failed: ${r.out.trim().slice(-300)}`);
-      const f = await run("/usr/bin/find", [expanded, "-type", "d", "-name", "podman", "-print", "-quit"]);
-      const found = f.out.split("\n")[0]?.trim();
-      if (!found) throw new Error("could not find the podman directory inside the installer");
-      const dest = join(homedir(), "podman-dist", "podman");
-      mkdirSync(join(homedir(), "podman-dist"), { recursive: true });
-      rmSync(dest, { recursive: true, force: true });
-      cpSync(found, dest, { recursive: true });
-      const dist = join(homedir(), "podman-dist");
-      writeFileSync(
-        join(dist, "env.sh"),
-        `export PATH="${dist}/podman/bin:$PATH"\nexport CONTAINERS_HELPER_BINARY_DIR="${dist}/podman/bin"\nexport CONTAINERS_MACHINE_PROVIDER=applehv\n`,
-      );
-      if (!existsSync(join(dest, "bin", "podman"))) throw new Error("installer did not produce bin/podman");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+  // The engine ships inside the app (scripts/fetch-engine.sh). Nothing is unpacked into the home folder.
+  unpackPodmanPkg: async () => {
+    throw new Error("The engine is bundled with this app and was not found. Reinstall AW Desktop.");
   },
 };
 

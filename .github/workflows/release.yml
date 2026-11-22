@@ -64,6 +64,10 @@ jobs:
           AW_UI_REPO_TOKEN: ${{ secrets.AW_UI_REPO_TOKEN }}
         run: bash scripts/fetch-ui.sh
 
+      - name: Bundle container engine
+        # Pinned pkg + sha256 in scripts/engine-ref; fails on a mismatch.
+        run: bash scripts/fetch-engine.sh
+
       - name: Typecheck + unit tests
         run: npm run typecheck && npm test
 
@@ -123,6 +127,12 @@ jobs:
         # inside electron-builder.yml / build/notarize.js; an unsigned DMG
         # is still a real, downloadable artifact, just Gatekeeper-warned.
         run: npm run build && npx electron-builder --mac --publish never
+
+      - name: Verify the bundled engine is signed (before DMG notarization)
+        # Every nested engine binary must be present, Developer ID signed, hardened, timestamped,
+        # and carry the VM entitlements. Skipped for an unsigned build (no CSC_LINK).
+        if: env.CSC_LINK_RAW != ''
+        run: bash build/verify-engine-signing.sh "dist/mac-arm64/AW Desktop.app"
 
       - name: Notarize + staple DMG, verify, publish
         # electron-builder signs the DMG (dmg.sign) but only the .app is

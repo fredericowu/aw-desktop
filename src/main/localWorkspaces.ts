@@ -34,16 +34,23 @@ export function toWorkspaceInfo(ws: LocalWorkspace, running: boolean): Workspace
   };
 }
 
-export const podmanBinPath = (home = homedir()) => join(home, "podman-dist", "podman", "bin", "podman");
+/** Where the bundled container engine lives: packaged resources, or AW_DESKTOP_ENGINE_DIR for dev
+ * (a directory holding bin/, lib/, share/ as laid out by scripts/fetch-engine.sh). The app never
+ * reads or writes ~/podman-dist: that directory belongs to aw-remote-host's own bootstrap. */
+export function engineDir(): string {
+  return process.env["AW_DESKTOP_ENGINE_DIR"] || join(process.resourcesPath ?? "", "engine");
+}
+
+export const podmanBinPath = (engine = engineDir()) => join(engine, "bin", "podman");
 
 /** macOS caps a unix socket path at 103 bytes. podman creates
  * <home>/.podman/aw-<id>-ignition.sock, so the per-workspace HOME must be short:
  * under ~/Library/Application Support/aw-desktop it was 117 bytes and
  * `podman machine start` died with "bind: invalid argument". */
-export function runtimeConfig(_userData: string, home = homedir()): RuntimeConfig {
-  const bin = dirname(podmanBinPath(home));
+export function runtimeConfig(_userData: string, home = homedir(), engine = engineDir()): RuntimeConfig {
+  const bin = dirname(podmanBinPath(engine));
   return {
-    podmanPath: podmanBinPath(home),
+    podmanPath: podmanBinPath(engine),
     homesRoot: join(home, ".awd"),
     dataRoot: join(home, "aw-workspaces"),
     path: `${bin}:/usr/bin:/bin:/usr/sbin:/sbin`,

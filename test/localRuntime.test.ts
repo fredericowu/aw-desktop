@@ -70,10 +70,11 @@ describe("env isolation", () => {
     const a = podmanEnv(cfg, "localaaa");
     const b = podmanEnv(cfg, "localbbb");
     expect(a.HOME).not.toBe(b.HOME);
+    expect(a.CONTAINERS_HELPER_BINARY_DIR).toBe("/app");
     expect(a.TMPDIR).toBe("/tmp/aw-localaaa");
     expect(a.TMPDIR.length).toBeLessThan(40);
     expect(a.CONTAINERS_MACHINE_PROVIDER).toBe("libkrun");
-    expect(Object.keys(a).sort()).toEqual(["CONTAINERS_MACHINE_PROVIDER", "HOME", "PATH", "TMPDIR"]);
+    expect(Object.keys(a).sort()).toEqual(["CONTAINERS_HELPER_BINARY_DIR", "CONTAINERS_MACHINE_PROVIDER", "HOME", "PATH", "TMPDIR"]);
     expect(a.HOME).not.toBe(process.env.HOME);
     expect(machineProvider("x64")).toBe("applehv");
   });

@@ -5,3 +5,4 @@ dist/
 .DS_Store
 resources/ui/
 resources/build-info.json
+resources/engine/

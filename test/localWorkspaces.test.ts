@@ -27,12 +27,14 @@ describe("local workspace view", () => {
     ]);
   });
 
-  it("runtime config uses the vendored podman, app-private homes and ~/aw-workspaces, never the default machine home", () => {
-    const c = runtimeConfig("/ud", "/Users/x");
-    expect(c.podmanPath).toBe("/Users/x/podman-dist/podman/bin/podman");
+  it("runtime config uses the bundled podman, app-private homes and ~/aw-workspaces, never the default machine home or ~/podman-dist", () => {
+    const eng = "/Applications/AW Desktop.app/Contents/Resources/engine";
+    const c = runtimeConfig("/ud", "/Users/x", eng);
+    expect(c.podmanPath).toBe(`${eng}/bin/podman`);
     expect(c.homesRoot).toBe("/Users/x/.awd");
     expect(c.dataRoot).toBe("/Users/x/aw-workspaces");
-    expect(c.path.startsWith("/Users/x/podman-dist/podman/bin:")).toBe(true);
+    expect(c.path.startsWith(`${eng}/bin:`)).toBe(true);
+    expect(JSON.stringify(c)).not.toContain("podman-dist");
   });
 });
 

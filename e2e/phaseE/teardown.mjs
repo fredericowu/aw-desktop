@@ -6,10 +6,10 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { HOME, UD, log } from "./common.mjs";
+import { APP, HOME, UD, log } from "./common.mjs";
 import { HOST_HEALTH_URL, parseHostMachine, toolEnv, workspacePodmanEnv } from "./guard.mjs";
 
-const PODMAN = process.env.AW_E2E_PODMAN ?? join(HOME, "podman-dist/podman/bin/podman");
+const PODMAN = process.env.AW_E2E_PODMAN ?? join(APP, "Contents/Resources/engine/bin/podman");
 const HOMES = join(HOME, ".awd");
 const DATA = join(HOME, "aw-workspaces");
 const REGISTRY = join(UD, "local-workspaces.json");

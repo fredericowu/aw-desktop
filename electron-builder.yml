@@ -29,6 +29,23 @@ mac:
   gatekeeperAssess: false
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
+  # Container engine (scripts/fetch-engine.sh), mac only: Windows has no such bundle. Copied as-is
+  # to <Resources>/engine, keeping bin/ lib/ share/ because krunkit finds libkrun through @rpath ../lib.
+  extraResources:
+    - from: resources/engine
+      to: engine
+  # Sign every engine Mach-O explicitly (hardened runtime + the one entitlements file), instead of
+  # relying on the Resources walk. Notarization rejects any unsigned or non-hardened nested binary.
+  # build/verify-engine-signing.sh asserts the result on the built .app.
+  binaries:
+    - Contents/Resources/engine/bin/podman
+    - Contents/Resources/engine/bin/gvproxy
+    - Contents/Resources/engine/bin/vfkit
+    - Contents/Resources/engine/bin/krunkit
+    - Contents/Resources/engine/lib/libkrun.dylib
+    - Contents/Resources/engine/lib/libvirglrenderer.1.dylib
+    - Contents/Resources/engine/lib/libepoxy.0.dylib
+    - Contents/Resources/engine/lib/libMoltenVK.dylib
   # Developer ID Application cert, not Apple Distribution — this app is
   # notarized direct-download, never Mac App Store (Architect card
   # 4175bf3b-9510-8104-8c21-f5008b4d708b §3/§4). electron-builder reads the
