@@ -1,4 +1,4 @@
-import type { DepId, DepsSnapshot } from "./deps";
+import type { PreflightResult } from "./preflight";
 export interface AwUser {
   id: number;
   email: string;
@@ -31,21 +31,6 @@ export interface WorkspaceInfo {
 export interface AccountInfo {
   limits?: { max_workspaces?: number; max_local_workspaces?: number };
   local_count?: number;
-}
-
-export type RuntimeKind = "podman" | "docker-desktop" | "colima";
-
-export interface RuntimeStatus {
-  kind: RuntimeKind;
-  installed: boolean;
-  running: boolean;
-  path?: string;
-}
-
-export interface RuntimeCheck {
-  runtimes: RuntimeStatus[];
-  /** At least one runtime is installed AND running. */
-  ready: boolean;
 }
 
 /** Result of a call that can fail with a backend error: `code` is the
@@ -104,7 +89,8 @@ export interface AwBridge {
   startGoogleSignIn(): Promise<{ ok: boolean; error?: string }>;
   pickWorkspace(slug: string): Promise<{ ok: boolean; error?: string }>;
   listWorkspaces(): Promise<ApiResult<WorkspaceListData>>;
-  checkRuntime(): Promise<RuntimeCheck>;
+  /** Silent host check (nothing is installed or started). `ok:false` carries plain-language copy. */
+  preflight(): Promise<PreflightResult>;
   /** Cap check (main process) + register a standalone local workspace + bring it up.
    * 402 `plan_limit_local_workspaces` when the signed-in user is at the cap. */
   createLocalWorkspace(name: string): Promise<ApiResult<WorkspaceInfo>>;
@@ -114,10 +100,6 @@ export interface AwBridge {
   removeLocalWorkspace(slug: string): Promise<ApiResult<null>>;
   getBootstrapProgress(): Promise<BootstrapProgress | null>;
   onBootstrapProgress(cb: (p: BootstrapProgress) => void): () => void;
-  depsList(): Promise<DepsSnapshot>;
-  /** `approved` must be true: it is the user's explicit click on Install. */
-  depsInstall(id: DepId, approved: boolean): Promise<{ ok: boolean; error?: string }>;
-  onDepsChanged(cb: () => void): () => void;
   logout(): Promise<void>;
   onStateChanged(cb: (state: AuthState) => void): () => void;
 }
