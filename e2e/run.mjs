@@ -107,7 +107,7 @@ rec("deps: click -> installing with progress (approved=true sent)", JSON.stringi
 await snap(page, "07-deps-installing");
 // Manual Re-check, independent of the 3s poll. After a poll tick the next poll is ~3s away; flip the stub and click at once,
 // then require that the first depsList call after the flip happened well inside that gap (so it was the click, not a poll)
-// and that the row updated. A slow click that overruns the gap fails instead of passing on a poll.
+// and that the row updated. (Electron's app.evaluate calls fn(electronModule, arg): the arg is the SECOND parameter.) A slow click that overruns the gap fails instead of passing on a poll.
 // E2E_NEGATIVE_RECHECK=1 skips the click: this step must then FAIL (negative control).
 await app.evaluate(() => { globalThis.__deps.podman = "installed"; });
 await until(async () => (await stateOf("podman")) === "installed", 10000, "podman installed via poll");
@@ -117,7 +117,7 @@ const tickTs = await app.evaluate(() => globalThis.__deps.callTs.at(-1));
 const flipTs = await app.evaluate(() => { globalThis.__deps.podman = "missing"; return Date.now(); });
 if (process.env.E2E_NEGATIVE_RECHECK !== "1") await page.locator('[data-testid="deps-recheck"]').click();
 await until(async () => (await stateOf("podman")) === "missing", 1000, "Re-check click update").catch(() => {});
-const rcCall = await app.evaluate((f) => globalThis.__deps.callTs.find((t) => t > f) ?? null, flipTs);
+const rcCall = await app.evaluate((_electron, f) => globalThis.__deps.callTs.find((t) => t > f) ?? null, flipTs);
 rec("deps: Re-check click updates immediately (before the 3s poll)", (await stateOf("podman")) === "missing" && rcCall !== null && rcCall - tickTs < 2500, `tick->call ${rcCall === null ? "none" : rcCall - tickTs}ms`);
 await app.evaluate(() => { globalThis.__deps.podman = "installed"; });
 await until(async () => (await stateOf("podman")) === "installed", 10000, "podman installed");
