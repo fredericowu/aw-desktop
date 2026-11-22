@@ -165,7 +165,62 @@ Product Owner accepting the core and apps contract change as scope.
      asked and the guard would refuse every workspace. The container
      inventory in checks 2 and 4 lists all states (`podman ps -a`), so a
      stopped or exited extra container still counts. If the inventory changed
-     between the two passes, refuse.
+     between the two passes, refuse. Two passes that agree prove nothing on
+     their own, because the engine stays reachable between and after them;
+     check 7 is what makes the proof hold through removal.
+  7. Exclusion through removal (the fence). Engine writers are: (a) the app's
+     own lifecycle actions (start, stop, Remove, supervisor recovery, wake
+     hook, quit, a second re-create); (b) the three containers, and any app
+     container the core starts through the socket; (c) any other client of the
+     engine's host socket under the workspace's podman `HOME`, such as a user
+     running `podman` with that `HOME`. Each is excluded, in this order:
+     - (a) The whole guarded operation, from the first pass to machine
+       removal, runs inside the existing setup slot (`src/main/index.ts:35`)
+       and sets a per-workspace `recreating` flag. The supervisor, the wake
+       hook and every IPC lifecycle action read the flag and return "busy"
+       without touching the engine. A second re-create is refused the same way. Quit is included: the
+       `before-quit` hook (`src/main/index.ts:472-477`) calls `stopAll()`
+       directly today, so it is changed to await the guarded operation. When
+       `recreating` is set it waits until removal completes or the guard
+       aborts and finishes its cleanup, and only then stops the workspaces
+       and exits. It never stops the VM under the guard.
+     - (b) The three containers are stopped by the quiesce above, so the core
+       can no longer create containers or volumes. Any other container fails
+       check 2.
+     - (c) After the quiesce, the app closes the engine API: it stops the
+       engine's rootless socket and service units inside the VM (`systemctl
+       --user stop podman.socket podman.service`, run as the VM's podman user
+       over the app's own `machine ssh`; the API socket is
+       `/run/user/$(id -u)/podman/podman.sock`, `src/main/localRuntime.ts:356-359`,
+       so system units are the wrong target)
+       and removes the forwarded host socket. All later reads in the proof go
+       through the in-VM CLI over `machine ssh`, which talks to the local
+       store and not to the API socket. Fence verification, all of which must
+       pass: a connection to the host socket is refused; the same user units
+       report inactive (`systemctl --user is-active`); no process other than the app's own ssh session is using the
+       engine. If any of these cannot be shown, refuse and leave the VM
+       running. A client that already held an open connection when the units
+       stop is dropped with the service; the event check below catches
+       anything that slipped in first.
+     - The final pass is the last thing before removal and is the same pass
+       that proves the fence: it re-reads volumes, `ps -a`, inspect and diff,
+       and also reads the engine event log from the fence time to now
+       (`podman events --since <fence> --until now --stream=false`). Any
+       create, remove, volume or container event after the fence refuses. The
+       removal command starts only after that pass returns, with nothing else
+       allowed to run in between, and the VM is never restarted between the
+       fence and removal. If removal does not start, the app reopens the
+       same user units and restarts the workspace, so a refusal leaves the VM as
+       it was.
+     Writers in scope are (a), (b) and (c) above. A writer that logs in to the
+     VM over ssh and runs the in-VM CLI is out of scope: that CLI reads the
+     local store directly, so closing the API does not stop it, and no
+     point-in-time check can exclude it between the final read and removal.
+     The residual that this does not close is someone with the machine's ssh
+     key who logs in and mutates the VM by hand during the window. The key
+     sits in the app-private `HOME`; the guard accepts that residual and says
+     so, rather than claiming it excludes a user who is deliberately attacking
+     the VM.
   6. The removal itself is a new VM-only operation, not the existing Remove
      path. Remove deletes the workspace data dirs and unregisters the
      workspace (`src/main/localRuntime.ts:500-549`,
@@ -371,8 +426,26 @@ change.
   specific wrong message. Raw stderr goes to the diagnostics log only.
 - Card 5 (supervisor): the three recovery scenarios in the set-level checks
   pass, and Remove during recovery does not race it.
-- Card 6 (guards, prune, re-create): the re-create checks 1 to 5 above each
-  have a test where that check alone fails and the action is refused. The
+- Card 6 (guards, prune, re-create): the re-create checks 1 to 5 and 7 above
+  each have a test where that check alone fails and the action is refused.
+  Intervening-mutation case, run on a real VM: a harness injects a mutation
+  at each of four points: after the first volume listing, after the second,
+  after the final pass and immediately before the removal command, and during
+  the quiesce. The mutations are `podman volume create` and `podman run`
+  through the host socket, the same
+  from inside a container, a Start click, the wake hook, a supervisor
+  recovery tick and Quit. Injection through a hand-opened in-VM ssh session
+  is not in the matrix: it is the accepted residual of check 7, except that
+  one injected before the fence must be caught by the passes and the event
+  check. For every injection the invariant
+  is: no named volume or container exists at removal that was absent from the
+  proven inventory. Pass means either the mutation is refused (socket
+  refused, "busy") and the action completes with nothing lost, or the action
+  is refused and the VM still holds the mutation intact. A run where the
+  volume is created and the VM is then removed fails. A further case makes the
+  fence unprovable (the socket unit cannot be stopped) and asserts refusal
+  with the VM running. The test is mutation-checked: with check 7 disabled the
+  host-socket injection after the final pass must fail it. The
   VM-only removal (6) has the data-survival test described there. "Free up
   space" removes images only; a test with a named volume present shows the
   volume survives. The `podman diff` allowlist is written down from a
