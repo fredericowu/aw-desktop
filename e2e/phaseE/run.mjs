@@ -47,11 +47,11 @@ const hostBefore = await hostState();
 log("host state before (must be unchanged after the run):", JSON.stringify(hostBefore));
 // Everything after the baseline runs inside try so the host-integrity check below still runs (and the
 // original error is preserved) when a step or teardown throws.
-let ok = false, fatal = null;
+let ok = false, fatal = null, app = null;
 try {
   snapshot();
   log("keychain item before:", keychainItem(), "files:", files());
-  let app = await launch();
+  app = await launch();
   let page = await pickerWindow(app);
   await page.waitForSelector('input[type="email"], input[type="password"]', { timeout: 20000 });
   rec("s5: fresh launch shows login (no session)", true, "version " + (await app.evaluate(({ app }) => app.getVersion())));
@@ -157,11 +157,14 @@ try {
   await snap(page, "s8-picker");
 
   await app.close();
+  app = null;
   ok = summary();
 } catch (e) {
   fatal = e;
   console.error(e);
 }
+// A step that threw leaves Electron alive; close it first so its front servers are released before teardown/leftovers.
+if (app) { try { await app.close(); } catch (e) { console.error(e); } app = null; }
 if (DO_TEARDOWN) { try { await teardown(); } catch (e) { fatal ??= e; console.error(e); } }
 let left = {};
 try { left = await leftovers(); } catch (e) { fatal ??= e; console.error(e); }
