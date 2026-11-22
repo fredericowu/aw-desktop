@@ -101,6 +101,17 @@ export class LocalWorkspaces {
     return workspace;
   }
 
+  /** Remove one workspace completely: front server, containers, machine, dirs, then the registry entry.
+   * The registry entry goes LAST so a failed cleanup stays visible and can be retried; ports free with it. */
+  async destroy(id: string): Promise<void> {
+    if (!this.registry.get(id)) return;
+    await this.fronts.get(id)?.close();
+    this.fronts.delete(id);
+    this.running.delete(id);
+    await this.runtime.destroy(id);
+    this.registry.remove(id);
+  }
+
   /** Stop every running workspace (app quit). Best effort per workspace so one failure does not strand the rest. */
   async stopAll(): Promise<void> {
     const ids = [...this.running];

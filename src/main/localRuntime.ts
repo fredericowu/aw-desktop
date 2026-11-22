@@ -13,8 +13,8 @@
 import { execFile } from "node:child_process";
 import { get as httpGet } from "node:http";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { join, relative, isAbsolute } from "node:path";
 import type { LocalWorkspace } from "./localRegistry";
 
 /** Pinned public tag (spike verified v0.158.0). Not `latest`: the bundled UI must match the core. */
@@ -70,12 +70,15 @@ export interface FsOps {
   writeFile(p: string, data: string, mode?: number): void;
   readFile(p: string): string | null;
   isEmptyDir(p: string): boolean;
+  /** Recursive, forced delete; a missing path is not an error. */
+  rmrf(p: string): void;
 }
 export const realFs: FsOps = {
   mkdirp: (p) => void mkdirSync(p, { recursive: true }),
   writeFile: (p, d, mode) => writeFileSync(p, d, mode ? { mode } : undefined),
   readFile: (p) => (existsSync(p) ? readFileSync(p, "utf8") : null),
   isEmptyDir: (p) => !existsSync(p) || readdirSync(p).length === 0,
+  rmrf: (p) => rmSync(p, { recursive: true, force: true }),
 };
 
 export interface RuntimeConfig {
@@ -477,8 +480,51 @@ export class LocalRuntime {
     }
   }
 
-  /** Remove the machine. Data dir is kept. */
+  /**
+   * Full cleanup of ONE workspace: containers, network, the podman machine, then every
+   * directory this workspace id owns (data, podman HOME, TMPDIR). Touches nothing else:
+   * the id is validated and each path must resolve under its configured root, so the
+   * default podman machine, the user's HOME and the live :9030 workspace are out of reach.
+   * A machine-remove failure throws BEFORE any directory is deleted, so a retry still
+   * has everything it needs; a workspace that never got a machine (half-created) is fine.
+   */
   async destroy(id: string): Promise<void> {
-    if (await this.machineExists(id)) await this.machineRemove(id);
+    const paths = this.ownedDirs(id);
+    if (await this.machineExists(id)) {
+      if (await this.machineRunning(id)) {
+        const n = containerNames(id);
+        for (const c of [n.workspace, n.redis, n.postgres]) {
+          try {
+            await this.raw(id, ["--connection", machineName(id), "rm", "-f", c]);
+          } catch {
+            // the machine removal below takes the containers with it
+          }
+        }
+        try {
+          await this.raw(id, ["--connection", machineName(id), "network", "rm", "-f", networkName(id)]);
+        } catch {
+          // same: removed with the machine
+        }
+      }
+      await this.machineRemove(id);
+      if (await this.machineExists(id)) throw new Error(`could not remove machine ${machineName(id)}`);
+    }
+    for (const d of paths) this.fs.rmrf(d);
+  }
+
+  /** The directories owned by `id`, each verified to sit strictly inside its configured root. */
+  private ownedDirs(id: string): string[] {
+    if (!/^[a-z0-9]+$/.test(id)) throw new Error(`refusing to clean up invalid workspace id "${id}"`);
+    const p = workspacePaths(this.cfg, id);
+    const dirs: Array<[string, string]> = [
+      [p.data, this.cfg.dataRoot],
+      [join(this.cfg.homesRoot, id), this.cfg.homesRoot],
+      [p.tmp, this.cfg.tmpRoot ?? "/tmp"],
+    ];
+    for (const [dir, root] of dirs) {
+      const rel = relative(root, dir);
+      if (!rel || rel.startsWith("..") || isAbsolute(rel)) throw new Error(`refusing to remove ${dir}: outside ${root}`);
+    }
+    return dirs.map(([d]) => d);
   }
 }

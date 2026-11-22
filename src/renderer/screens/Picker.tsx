@@ -26,11 +26,14 @@ type Modal =
   | { kind: "limit"; limit: number }
   | { kind: "wizard" };
 
+type Removal = { ws: WorkspaceInfo; busy: boolean; error: string | null };
+
 export function Picker({ state }: { state: AuthState }) {
   const [load, setLoad] = useState<Load>({ phase: "loading" });
   const [modal, setModal] = useState<Modal>(null);
   const [progress, setProgress] = useState<BootstrapProgress | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [removal, setRemoval] = useState<Removal | null>(null);
 
   // Re-sync with a bootstrap that is already running (e.g. window re-opened)
   // and follow its live progress.
@@ -60,6 +63,24 @@ export function Picker({ state }: { state: AuthState }) {
   // fall back to what we can see when the backend predates local_count.
   const serverCount = ready?.account?.local_count;
   const localCount = serverCount ?? local.length;
+
+  async function confirmRemove() {
+    if (!removal || removal.busy) return;
+    const target = removal.ws;
+    setRemoval({ ws: target, busy: true, error: null });
+    let res: ApiResult<null>;
+    try {
+      res = await window.aw.removeLocalWorkspace(target.name);
+    } catch (err) {
+      res = { ok: false, error: err instanceof Error ? err.message : undefined };
+    }
+    if (res.ok) {
+      setRemoval(null);
+      void refresh(); // the used/limit badge comes from the fresh list
+    } else {
+      setRemoval({ ws: target, busy: false, error: res.error ?? "Could not remove the workspace." });
+    }
+  }
 
   function onCreateLocal() {
     // Cap gate first: no runtime check, no API call when already at the cap.
@@ -139,6 +160,8 @@ export function Picker({ state }: { state: AuthState }) {
                   <WorkspaceRow
                     key={ws.name}
                     ws={ws}
+                    onRemove={() => setRemoval({ ws, busy: false, error: null })}
+                    removeDisabled={removal?.busy === true}
                     onFinish={async () => {
                       setNotice(null);
                       const r = await window.aw.finishLocalSetup(ws.name);
@@ -200,7 +223,24 @@ export function Picker({ state }: { state: AuthState }) {
           }}
         />
       )}
-      {modal?.kind === "limit" && <LimitModal limit={modal.limit} onClose={() => setModal(null)} />}
+      {modal?.kind === "limit" && (
+        <LimitModal
+          limit={modal.limit}
+          onClose={() => setModal(null)}
+          onRemove={() => {
+            setModal(null);
+            // Hand the user to the Local list, where each workspace has its Remove button.
+            document.querySelector<HTMLElement>('[data-testid="local-block"] [data-remove]')?.focus();
+          }}
+        />
+      )}
+      {removal && (
+        <RemoveModal
+          removal={removal}
+          onConfirm={() => void confirmRemove()}
+          onCancel={() => setRemoval(null)}
+        />
+      )}
       {modal?.kind === "wizard" && (
         <CreateWizard
           onClose={() => setModal(null)}
@@ -218,12 +258,29 @@ export function Picker({ state }: { state: AuthState }) {
 function WorkspaceRow({
   ws,
   onFinish,
+  onRemove,
+  removeDisabled,
   cloud,
 }: {
   ws: WorkspaceInfo;
   onFinish: () => void;
+  onRemove?: () => void;
+  removeDisabled?: boolean;
   cloud?: boolean;
 }) {
+  const label0 = ws.display_name ?? ws.name;
+  const remove = onRemove && (
+    <button
+      className="link"
+      data-remove
+      data-testid={`remove-${ws.name}`}
+      disabled={removeDisabled}
+      aria-label={`Remove ${label0}`}
+      onClick={onRemove}
+    >
+      Remove
+    </button>
+  );
   const open = (
     <button className="secondary" onClick={() => window.aw.pickWorkspace(ws.name)}>
       {ws.display_name ?? ws.name}
@@ -236,6 +293,7 @@ function WorkspaceRow({
       <div className="workspace-row" data-testid={`here-${ws.name}`}>
         {open}
         <span className="dim">Runs on this Mac</span>
+        {remove}
       </div>
     );
   }
@@ -246,6 +304,7 @@ function WorkspaceRow({
       <button className="primary" onClick={onFinish}>
         Start
       </button>
+      {remove}
     </div>
   );
 }
@@ -307,7 +366,41 @@ function ProgressModal({
   );
 }
 
-function LimitModal({ limit, onClose }: { limit: number; onClose: () => void }) {
+function RemoveModal({
+  removal,
+  onConfirm,
+  onCancel,
+}: {
+  removal: Removal;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const name = removal.ws.display_name ?? removal.ws.name;
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true" data-testid="remove-modal">
+      <div className="card modal">
+        <strong>Remove “{name}”?</strong>
+        <span className="dim">
+          This deletes the workspace “{name}” and all of its data from this Mac, including its database and files.
+          This cannot be undone.
+        </span>
+        {removal.error && (
+          <span className="error" data-testid="remove-error" role="alert">
+            {removal.error}
+          </span>
+        )}
+        <button className="primary" data-testid="remove-confirm" disabled={removal.busy} onClick={onConfirm}>
+          {removal.busy ? "Removing…" : removal.error ? "Retry" : "Remove workspace"}
+        </button>
+        <button className="link" data-testid="remove-cancel" disabled={removal.busy} onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function LimitModal({ limit, onClose, onRemove }: { limit: number; onClose: () => void; onRemove: () => void }) {
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
       <div className="card modal">
@@ -316,7 +409,10 @@ function LimitModal({ limit, onClose }: { limit: number; onClose: () => void }) 
           Your plan includes {limit} local workspaces and you've used them all. Remove one, or upgrade to
           create more.
         </span>
-        <button className="primary" onClick={onClose}>
+        <button className="primary" data-testid="limit-remove" onClick={onRemove}>
+          Remove a workspace
+        </button>
+        <button className="link" onClick={onClose}>
           Got it
         </button>
       </div>

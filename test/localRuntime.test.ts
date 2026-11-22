@@ -33,11 +33,13 @@ function harness(handler: (args: string[]) => RunResult | undefined = () => unde
   const calls: Call[] = [];
   const files: Record<string, string> = {};
   const dirs: string[] = [];
+  const removed: string[] = [];
   const fs: FsOps = {
     mkdirp: (p) => void dirs.push(p),
     writeFile: (p, d) => void (files[p] = d),
     readFile: (p) => files[p] ?? null,
     isEmptyDir: () => empty,
+    rmrf: (p) => void removed.push(p),
   };
   let t = 0;
   const rt = new LocalRuntime(cfg, {
@@ -60,7 +62,7 @@ function harness(handler: (args: string[]) => RunResult | undefined = () => unde
       return ok();
     },
   });
-  return { rt, calls, files, dirs };
+  return { rt, calls, files, dirs, removed };
 }
 
 describe("env isolation", () => {
@@ -201,7 +203,7 @@ describe("start sequence", () => {
     const calls: string[][] = [];
     let t = 0;
     const rt = new LocalRuntime(cfg, {
-      fs: { mkdirp() {}, writeFile() {}, readFile: () => "pw", isEmptyDir: () => false },
+      fs: { mkdirp() {}, writeFile() {}, readFile: () => "pw", isEmptyDir: () => false, rmrf() {} },
       sleep: async () => void (t += 1000),
       now: () => t,
       httpStatus: async () => 0,
@@ -220,13 +222,61 @@ describe("start sequence", () => {
   });
 });
 
-describe("stop / destroy", () => {
-  it("stop stops containers then the machine; destroy removes only the machine", async () => {
+describe("stop", () => {
+  it("stop stops containers then the machine", async () => {
     const h = harness((args) => (args.join(" ").includes(" exists ") ? ok() : undefined));
     await h.rt.stop("localaaa");
-    const v = h.calls.map((c) => c.args.join(" "));
-    expect(v.at(-1)).toBe("machine stop aw-localaaa");
+    expect(h.calls.map((c) => c.args.join(" ")).at(-1)).toBe("machine stop aw-localaaa");
+  });
+});
+
+describe("destroy (full cleanup)", () => {
+  it("removes containers, network, machine, then data / podman HOME / tmp dirs of that id only", async () => {
+    // machine exists until `machine rm` has run
+    let gone = false;
+    const h = harness((args) => {
+      const j = args.join(" ");
+      if (j.startsWith("machine rm")) { gone = true; return ok(); }
+      if (j.includes("machine list") && j.includes("{{.Running}}")) return ok(gone ? "" : "aw-localaaa true\n");
+      if (j.includes("machine list")) return ok(gone ? "" : "aw-localaaa*\n");
+      return undefined;
+    });
     await h.rt.destroy("localaaa");
-    expect(h.calls.at(-1)?.args).toEqual(["machine", "rm", "--force", "aw-localaaa"]);
+    const v = h.calls.map((c) => c.args.join(" "));
+    expect(v).toEqual(expect.arrayContaining([
+      "--connection aw-localaaa rm -f aw-localaaa-workspace",
+      "--connection aw-localaaa rm -f aw-localaaa-redis",
+      "--connection aw-localaaa rm -f aw-localaaa-postgres",
+      "--connection aw-localaaa network rm -f aw-localaaa",
+      "machine rm --force aw-localaaa",
+    ]));
+    expect(v.findIndex((x) => x.startsWith("machine rm"))).toBeGreaterThan(v.findIndex((x) => x.includes("network rm")));
+    expect(h.removed).toEqual([
+      "/Users/u/aw-workspaces/localaaa",
+      "/Users/u/Library/Application Support/aw/local/localaaa",
+      "/tmp/aw-localaaa",
+    ]);
+    // never the default machine, and every podman call is namespaced to this id
+    expect(v.join("\n")).not.toContain("podman-machine-default");
+  });
+
+  it("a workspace that never got a machine (half-created) still has its dirs removed", async () => {
+    const h = harness((args) => (args.join(" ").includes("machine list") ? ok("") : undefined));
+    await h.rt.destroy("localaaa");
+    expect(h.calls.some((c) => c.args.join(" ").startsWith("machine rm"))).toBe(false);
+    expect(h.removed).toHaveLength(3);
+  });
+
+  it("keeps the dirs when the machine will not go, so a retry can finish", async () => {
+    const h = harness(); // default handler: the machine always still exists
+    await expect(h.rt.destroy("localaaa")).rejects.toThrow(/could not remove machine/);
+    expect(h.removed).toEqual([]);
+  });
+
+  it.each(["", "..", "../x", "a/b", "A", "local-1"])("refuses an unsafe id %j", async (id) => {
+    const h = harness();
+    await expect(h.rt.destroy(id)).rejects.toThrow(/invalid workspace id/);
+    expect(h.removed).toEqual([]);
+    expect(h.calls).toEqual([]);
   });
 });

@@ -13,6 +13,7 @@ const bridge: AwBridge = {
   checkRuntime: () => ipcRenderer.invoke("aw:checkRuntime"),
   createLocalWorkspace: (name) => ipcRenderer.invoke("aw:createLocalWorkspace", name),
   finishLocalSetup: (slug) => ipcRenderer.invoke("aw:finishLocalSetup", slug),
+  removeLocalWorkspace: (slug) => ipcRenderer.invoke("aw:removeLocalWorkspace", slug),
   getBootstrapProgress: () => ipcRenderer.invoke("aw:getBootstrapProgress"),
   onBootstrapProgress: (cb: (p: BootstrapProgress) => void) => {
     const listener = (_event: unknown, next: BootstrapProgress) => cb(next);

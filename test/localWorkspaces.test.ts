@@ -1,8 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 vi.mock("electron", () => ({ app: { getPath: () => "/tmp/aw-test-userdata" } }));
 
-import { fetchIdentityPublicKey, runtimeConfig, stepFor, toWorkspaceInfo } from "../src/main/localWorkspaces";
+import { LocalWorkspaces, fetchIdentityPublicKey, runtimeConfig, stepFor, toWorkspaceInfo } from "../src/main/localWorkspaces";
+import { LocalRegistry, fileStore } from "../src/main/localRegistry";
+import { LocalRuntime } from "../src/main/localRuntime";
 import { isAllowedTarget } from "../src/main/navPolicy";
 import { isLocal } from "../src/shared/workspaces";
 
@@ -62,5 +67,49 @@ describe("shell window navigation policy", () => {
   });
   it("still allows the apex and its subdomains", () => {
     expect(isAllowedTarget("https://acme.workspace.aw.tekflox.com/x")).toBe(true);
+  });
+});
+
+describe("LocalWorkspaces.destroy", () => {
+  it("removes the dirs and the registry entry, frees the ports, and leaves the other workspace alone", async () => {
+    const root = mkdtempSync(join(tmpdir(), "awd-destroy-"));
+    const cfg = { podmanPath: "/p", homesRoot: join(root, ".awd"), dataRoot: join(root, "aw-workspaces"), tmpRoot: join(root, "tmp"), path: "/bin" };
+    const lw = new LocalWorkspaces(() => null, async () => undefined);
+    let n = 0;
+    const registry = new LocalRegistry({ store: fileStore(join(root, "reg.json")), isPortFree: async () => true, newId: () => `local${++n}` });
+    const calls: string[] = [];
+    const runtime = new LocalRuntime(cfg, { run: async (_c, args) => (calls.push(args.join(" ")), { code: 0, stdout: "", stderr: "" }) });
+    Object.assign(lw, { registry, runtime });
+    const a = await registry.create("s", "A");
+    const b = await registry.create("s", "B");
+    for (const w of [a, b]) {
+      runtime.prepare(w.id);
+      writeFileSync(join(cfg.dataRoot, w.id, "postgres", "f"), "x");
+    }
+    expect(registry.listFor("s")).toHaveLength(2);
+
+    await lw.destroy(a.id);
+
+    expect(registry.get(a.id)).toBeUndefined();
+    expect(registry.listFor("s").map((w) => w.id)).toEqual([b.id]);
+    for (const d of [join(cfg.dataRoot, a.id), join(cfg.homesRoot, a.id), join(cfg.tmpRoot, `aw-${a.id}`)]) expect(existsSync(d)).toBe(false);
+    for (const d of [join(cfg.dataRoot, b.id), join(cfg.homesRoot, b.id), join(cfg.tmpRoot, `aw-${b.id}`)]) expect(existsSync(d)).toBe(true);
+    // ports released: a new workspace can take A's pair again
+    const c = await registry.create("s", "C");
+    expect([c.uiPort, c.apiPort]).toEqual([a.uiPort, a.apiPort]);
+    expect(calls.every((x) => !x.includes(b.id))).toBe(true);
+  });
+
+  it("keeps the registry entry when cleanup fails so the user can retry", async () => {
+    const root = mkdtempSync(join(tmpdir(), "awd-destroy-"));
+    const cfg = { podmanPath: "/p", homesRoot: join(root, ".awd"), dataRoot: join(root, "d"), tmpRoot: join(root, "t"), path: "/bin" };
+    const lw = new LocalWorkspaces(() => null, async () => undefined);
+    const registry = new LocalRegistry({ store: fileStore(join(root, "reg.json")), isPortFree: async () => true, newId: () => "localx" });
+    // `machine list` keeps reporting the machine, so removal can never be confirmed
+    const runtime = new LocalRuntime(cfg, { run: async (_c, args) => ({ code: 0, stdout: args.includes("list") ? "aw-localx*\n" : "", stderr: "" }) });
+    Object.assign(lw, { registry, runtime });
+    const w = await registry.create("s", "X");
+    await expect(lw.destroy(w.id)).rejects.toThrow();
+    expect(registry.get(w.id)).toBeDefined();
   });
 });
