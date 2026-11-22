@@ -6,7 +6,8 @@ import type {
   BootstrapProgress,
   WorkspaceInfo,
 } from "../../shared/types";
-import { STEP_LABEL, STEP_ORDER } from "../../shared/bootstrapState";
+import { STEP_LABEL } from "../../shared/bootstrapState";
+import { PHASE_LABEL, failureCopy } from "../../shared/errorCopy";
 import {
   DEFAULT_LOCAL_LIMIT,
   isPlanLimitCode,
@@ -299,7 +300,7 @@ function WorkspaceRow({
   return (
     <div className="workspace-row pending" data-testid={`pending-${ws.name}`}>
       <span>{label}</span>
-      <span className="dim">Not running. Starts a small VM on this Mac.</span>
+      <span className="dim">Not running. Starts on this Mac.</span>
       <button className="primary" onClick={onFinish}>
         Start
       </button>
@@ -320,27 +321,21 @@ function ProgressModal({
 }) {
   const failed = progress.phase === "failed";
   const [retryError, setRetryError] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true" data-testid="bootstrap-progress">
       <div className="card modal">
         <strong>{failed ? "Setup failed" : progress.phase === "done" ? "Your workspace is ready" : `Setting up ${progress.slug}`}</strong>
-        <ul className="runtime-list">
-          {STEP_ORDER.map((id) => {
-            const state = failed && progress.failedStep === id ? "failed" : progress.done.includes(id) ? "done" : progress.step === id ? "active" : "pending";
-            const mark = state === "done" ? "✓" : state === "failed" ? "✗" : state === "active" ? "…" : "·";
-            return (
-              <li key={id} data-testid={`step-${id}`} data-state={state} className={state === "failed" ? "error" : "dim"}>
-                {mark} {STEP_LABEL[id]}
-              </li>
-            );
-          })}
-        </ul>
+        {!failed && <span className="dim" data-testid="bootstrap-phase">{progress.step ? STEP_LABEL[progress.step] : PHASE_LABEL.preparing}</span>}
         {failed && (
           <>
             <span className="error" data-testid="bootstrap-error">
-              Failed at: {progress.failedStep ? STEP_LABEL[progress.failedStep] : "setup"}. {progress.error}
+              {progress.error ?? failureCopy("start_failed")}
             </span>
-            <pre className="dim" data-testid="bootstrap-log">{progress.lines.slice(-8).join("\n")}</pre>
+            <button className="link" data-testid="copy-details" onClick={async () => setCopied((await window.aw.copyDiagnostics()) ? "Copied." : "Nothing to copy.")}>
+              Copy details
+            </button>
+            {copied && <span className="dim">{copied}</span>}
             {retryError && <span className="error" data-testid="retry-error">{retryError}</span>}
             <button
               className="primary"
@@ -355,9 +350,6 @@ function ProgressModal({
               Close
             </button>
           </>
-        )}
-        {!failed && progress.lines.length > 0 && (
-          <pre className="dim" data-testid="bootstrap-log">{progress.lines.slice(-3).join("\n")}</pre>
         )}
         {!failed && <span className="dim">This can take several minutes the first time. You can leave this window open.</span>}
       </div>

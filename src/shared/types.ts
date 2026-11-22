@@ -1,4 +1,5 @@
 import type { PreflightResult } from "./preflight";
+import type { FailureCode } from "./errorCopy";
 export interface AwUser {
   id: number;
   email: string;
@@ -100,6 +101,8 @@ export interface AwBridge {
   removeLocalWorkspace(slug: string): Promise<ApiResult<null>>;
   getBootstrapProgress(): Promise<BootstrapProgress | null>;
   onBootstrapProgress(cb: (p: BootstrapProgress) => void): () => void;
+  /** Recent diagnostics text for support, copied to the clipboard by main. Resolves false if there is nothing to copy. */
+  copyDiagnostics(): Promise<boolean>;
   logout(): Promise<void>;
   onStateChanged(cb: (state: AuthState) => void): () => void;
 }
@@ -113,6 +116,8 @@ export interface BootstrapProgress {
   done: BootstrapStepId[];
   /** Last log lines, secrets redacted. */
   lines: string[];
+  /** Plain-language message only; raw detail is in the diagnostics log. */
   error?: string;
+  errorCode?: FailureCode;
   failedStep?: BootstrapStepId;
 }
