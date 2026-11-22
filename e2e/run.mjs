@@ -110,7 +110,12 @@ await snap(page, "07-deps-installing");
 // and that the row updated. (Electron's app.evaluate calls fn(electronModule, arg): the arg is the SECOND parameter.) A slow click that overruns the gap fails instead of passing on a poll.
 // E2E_NEGATIVE_RECHECK=1 skips the click: this step must then FAIL (negative control).
 await app.evaluate(() => { globalThis.__deps.podman = "installed"; });
-await until(async () => (await stateOf("podman")) === "installed", 10000, "podman installed via poll");
+// An occluded/backgrounded window can have its renderer timers throttled, which would starve the 3s poll this step relies on.
+await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().forEach((w) => w.webContents.setBackgroundThrottling(false)));
+await until(async () => (await stateOf("podman")) === "installed", 15000, "podman installed via poll").catch(async (e) => {
+  const d = await app.evaluate(({ BrowserWindow }) => ({ calls: globalThis.__deps.listCalls, podman: globalThis.__deps.podman, wins: BrowserWindow.getAllWindows().map((w) => ({ visible: w.isVisible(), focused: w.isFocused(), min: w.isMinimized() })) }));
+  throw new Error(`${e.message} (diag ${JSON.stringify(d)})`);
+});
 const calls0 = await app.evaluate(() => globalThis.__deps.listCalls);
 await until(async () => (await app.evaluate(() => globalThis.__deps.listCalls)) > calls0, 6000, "next poll tick");
 const tickTs = await app.evaluate(() => globalThis.__deps.callTs.at(-1));
