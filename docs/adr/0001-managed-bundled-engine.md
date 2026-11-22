@@ -19,9 +19,12 @@ What the code does today (all on `origin/main` at `c0d4e4b`):
 - VM size is 2 CPU, 4096 MiB, 40 GiB (`src/main/localRuntime.ts:179-181`). The
   6 CPU / 8 GiB / 100 GiB on the card is podman's own default, which is what
   the unrelated host `podman-machine-default` uses. The app never used it.
-- All workspace data sits on the Mac, not in the VM: the data dir is shared in
-  by virtiofs and bind-mounted (`src/main/localRuntime.ts:184`, `:194`, `:203`,
-  `:246-247`). The VM holds only images and container layers.
+- The data the app itself creates sits on the Mac, not in the VM: the data dir
+  is shared in by virtiofs and bind-mounted (`src/main/localRuntime.ts:184`,
+  `:194`, `:203`, `:246-247`). That is not the same as "the VM holds nothing":
+  the core also gets the VM's engine socket (`:248`), so an app can create a
+  named volume or keep state in a container layer, and both live on the VM
+  disk.
 - The engine is not bundled. It is downloaded from GitHub after a user click,
   into `~/podman-dist/podman` (`src/main/dependencies.ts:7-14`,
   `src/main/depsRuntime.ts:46-72`). That path is shared with aw-remote-host's
@@ -112,9 +115,27 @@ Product Owner accepting the core and apps contract change as scope.
   idempotent (`src/main/localRuntime.ts:412-465`). It runs inside the existing
   setup slot (`src/main/index.ts:35`) so it cannot race Remove. Three attempts,
   then "needs attention" with a Retry button.
-- Last resort, after repeated VM start failures: remove and re-create the VM.
-  This is safe only because no data lives in it. The data dirs are never
-  touched by self-heal.
+- Recovery must restart a stuck service, not only wait for it. Today `start`
+  leaves a container alone when the engine reports it running and its port is
+  unchanged (`src/main/localRuntime.ts:381-387`, `:468-478`), then waits on the
+  same health URL (`:461-463`). A hung core would time out three times
+  untouched. The recovery path therefore needs its own rule: when the VM and
+  the container are running but health fails, restart the workspace container
+  before waiting again. A normal start keeps today's behaviour. The existing
+  timeout test (`test/localRuntime.test.ts:202`) only checks that start
+  rejects; this case needs a test that the container is restarted and health
+  then passes.
+- Self-heal never removes or re-creates a VM. Removing a VM deletes its disk,
+  and with it any named volume or container state an app created through the
+  engine socket. If the VM cannot be started after the retries, the workspace
+  goes to "needs attention" and stays there.
+- Re-creating a VM is a separate, user-confirmed action. It is allowed only
+  when the app has proof the VM holds no workload data: the VM is running and
+  the engine lists no named volumes and no containers other than the three the
+  app created. If the engine cannot be asked, there is no proof and the action
+  is refused. A backup and restore path for engine volumes is not designed
+  here; until one exists, a VM that holds volumes and will not start is a
+  support case, not something the app repairs.
 - Launch: for every registry entry, stop any VM left running by a previous
   session. Workspaces start when picked (`src/main/index.ts:295-303`).
 - Quit: unchanged, stop all. No login item, no background agent.
@@ -125,7 +146,8 @@ Product Owner accepting the core and apps contract change as scope.
   confirm: refuse to start a second workspace on a Mac with less than 16 GiB of
   RAM, refuse to create with less than 15 GiB of free disk.
 - Disk growth: the VM disk grows and does not shrink. Prune unused images after
-  an image pin bump. "Free up space" re-creates the VM.
+  an image pin bump. "Free up space" prunes unused images only; it never prunes
+  volumes and never re-creates the VM.
 
 ## Decision 4: no engine wording reaches the user
 
@@ -184,9 +206,15 @@ be proven on a Mac that already has workspaces.
 
 - `e2e/phaseE/teardown.mjs` `snapshot()` (`:33-36`) records the host's
   `podman-machine-default` running state and the `:9030` health status;
-  `leftovers()` (`:93-111`) asserts both are unchanged. Read-only commands
+  a new host-integrity check asserts both are unchanged. Read-only commands
   only. A change fails the run with its own message and nothing tries to repair
   it.
+- The host check must fail the run in every mode. It cannot simply join
+  `leftovers()` (`e2e/phaseE/teardown.mjs:93-111`), because the runner records
+  every leftovers result as a pass unless `--teardown` is set
+  (`e2e/phaseE/run.mjs:157-158`). Keep it as its own result, recorded with its
+  real outcome and counted in the exit status (`e2e/phaseE/run.mjs:161`) with
+  or without `--teardown`.
 - Make the harness hermetic. The app passes podman exactly four variables
   (`src/main/localRuntime.ts:157-166`, pinned by `test/localRuntime.test.ts:76`).
   The harness does not: it spreads the caller's whole environment into every
@@ -218,8 +246,8 @@ be proven on a Mac that already has workspaces.
   workspace stops at quit.
 - An engine upgrade now needs an app release, and old VMs must keep working
   with the new binaries.
-- Auto re-create of a VM bakes in "nothing valuable lives in the VM". Any
-  future feature that stores state there breaks that.
+- A VM that will not start and holds app volumes has no in-app repair. That
+  stays true until someone designs backup and restore for engine volumes.
 - Windows will not share the macOS data layout.
 
 ## Risks for the Coders
@@ -252,7 +280,7 @@ Sizes: S is under a day, M is one to two days, L is three or more.
 | 3 | Remove the Dependencies step, add the silent preflight | M | 2 |
 | 4 | Plain-language copy, error classifier, diagnostics log, wording test | M | none |
 | 5 | Lifecycle supervisor: status model, health polling, self-heal, launch cleanup, wake check | L | 4 |
-| 6 | Sizing guards, image pruning, "Free up space" | S | 5 |
+| 6 | Sizing guards, image pruning, "Free up space" (images only), guarded user-confirmed VM re-create | S | 5 |
 | 7 | Engine-host interface split (refactor, no behaviour change) | M | 5 |
 | 8 | Windows design (new Architect card) | M | 7 |
 | 9 | Optional spike: shared VM with a nested engine per workspace | S | only if shared is still wanted |
@@ -266,4 +294,8 @@ Acceptance checks for the set:
 - Force-quitting the app and relaunching leaves no VM running until a workspace
   is picked.
 - A full phaseE run leaves `podman-machine-default` and `:9030` exactly as they
-  were, and fails loudly if not.
+  were, and exits non-zero if not, with or without `--teardown`.
+- A workspace whose core hangs while its container still reports running is
+  restarted by recovery and becomes healthy again.
+- No automatic path removes a VM. Re-create is refused when the engine lists a
+  named volume or cannot be asked.
