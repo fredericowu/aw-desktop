@@ -33,7 +33,10 @@ const listening = (p) => run("lsof", ["-nP", `-iTCP:${p}`, "-sTCP:LISTEN"]).out.
  * only lists machines and GETs /api/health, and nothing here ever tries to repair a difference.
  */
 export async function hostState() {
-  const hostEnv = { ...toolEnv(), HOME, ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}) };
+  // Keep the host's own podman config/data roots (XDG_*, CONTAINERS_CONF) so a host VM defined
+  // outside ~/.config is still seen; workspace calls stay isolated (workspacePodmanEnv).
+  const keep = ["TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "CONTAINERS_CONF", "CONTAINERS_MACHINE_PROVIDER"].filter((k) => process.env[k]);
+  const hostEnv = { ...toolEnv(), HOME, ...Object.fromEntries(keep.map((k) => [k, process.env[k]])) };
   const r = run(PODMAN, ["machine", "list", "--format", "{{.Name}}\t{{.Running}}"], { ...hostEnv, PATH: `${dirname(PODMAN)}:${hostEnv.PATH}` });
   const machine = r.code === 0 ? parseHostMachine(r.out) : "unknown";
   const health = await fetch(HOST_HEALTH_URL, { signal: AbortSignal.timeout(5000) }).then((x) => String(x.status), () => "down");

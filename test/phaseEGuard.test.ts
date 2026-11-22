@@ -35,6 +35,9 @@ describe("phaseE host integrity", () => {
   it("fails when :9030 health changes", () => {
     expect(hostIntegrityError({ machine: "stopped", health: "200" }, { machine: "stopped", health: "down" })).toMatch(/:9030 health 200 -> down/);
   });
+  it("fails when the host machine state could not be read, even if both captures match", () => {
+    expect(hostIntegrityError({ machine: "unknown", health: "200" }, { machine: "unknown", health: "200" })).toMatch(/could not verify/);
+  });
   it("passes on identical state, including a host VM stopped throughout", () => {
     expect(hostIntegrityError({ machine: "stopped", health: "down" }, { machine: "stopped", health: "down" })).toBeNull();
   });

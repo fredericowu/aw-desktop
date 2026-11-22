@@ -89,7 +89,9 @@ and run `node drive.mjs <up|stop|destroy> <root> <id> <apiPort> <uiPort> <uiDir>
   the app passes (`HOME`, `TMPDIR`, `PATH`, `CONTAINERS_MACHINE_PROVIDER`), with
   the workspace's own HOME/TMPDIR. The caller's environment is not inherited, so
   `XDG_*` / `CONTAINER_*` cannot point a call at the real podman config. The only
-  call that uses the real HOME is the read-only host capture above.
+  call that uses the real HOME (and keeps `XDG_*`/`CONTAINERS_CONF`, so a host VM defined
+  outside `~/.config` is still seen) is the read-only host capture above; if it cannot
+  read the host machine state, the host check fails rather than passing blind.
   The Electron app itself is still launched with the caller's environment.
 
 ## Known gaps (not fixed by this harness)

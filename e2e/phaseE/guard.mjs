@@ -41,6 +41,9 @@ export function parseHostMachine(out) {
 
 /** before/after are {machine, health}; returns null when identical, else a human-readable message. */
 export function hostIntegrityError(before, after) {
+  if (before.machine === "unknown" || after.machine === "unknown") {
+    return `could not verify ${HOST_MACHINE} state: before=${before.machine}, after=${after.machine}`;
+  }
   const diffs = [];
   if (before.machine !== after.machine) diffs.push(`${HOST_MACHINE} ${before.machine} -> ${after.machine}`);
   if (before.health !== after.health) diffs.push(`:9030 health ${before.health} -> ${after.health}`);
