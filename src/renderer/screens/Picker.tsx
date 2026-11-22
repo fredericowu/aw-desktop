@@ -153,7 +153,7 @@ export function Picker({ state }: { state: AuthState }) {
               </span>
             </div>
             {local.length === 0 ? (
-              <span className="dim">No local workspaces yet — create one to get started.</span>
+              <span className="dim">No local workspaces yet. Create one to get started.</span>
             ) : (
               <div className="workspace-list">
                 {local.map((ws) => (
@@ -449,7 +449,7 @@ function CreateWizard({
       <div className="card modal">
         {step === "runtime" ? (
           <>
-            <span className="dim">Step 1 of 2 — Dependencies</span>
+            <span className="dim">Step 1 of 2: Dependencies</span>
             <strong>Set up what your workspace needs</strong>
             <span className="dim">
               A local workspace needs a few things on this Mac. Nothing is installed until you approve it. This list
@@ -462,10 +462,10 @@ function CreateWizard({
           </>
         ) : (
           <>
-            <span className="dim">Step 2 of 2 — Name your workspace</span>
+            <span className="dim">Step 2 of 2: Name your workspace</span>
             <strong>Create a new workspace</strong>
             <span className="dim">
-              Give it a name — it'll run locally on this machine. You can invite teammates once it's created.
+              Give it a name. It'll run locally on this machine. You can invite teammates once it's created.
             </span>
             <label className="dim" htmlFor="sandbox-name">
               Workspace name

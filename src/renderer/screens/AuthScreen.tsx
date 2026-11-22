@@ -164,7 +164,7 @@ function Wordmark() {
 }
 
 function readableError(code: string): string {
-  if (code === "session_expired") return "Your session expired — please sign in again.";
-  if (code === "session_lost") return "Something went wrong — please sign in again.";
+  if (code === "session_expired") return "Your session expired. Please sign in again.";
+  if (code === "session_lost") return "Something went wrong. Please sign in again.";
   return code;
 }
