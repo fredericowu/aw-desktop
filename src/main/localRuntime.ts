@@ -14,7 +14,7 @@ import { execFile } from "node:child_process";
 import { get as httpGet } from "node:http";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { join, relative, isAbsolute } from "node:path";
+import { dirname, join, relative, isAbsolute } from "node:path";
 import type { LocalWorkspace } from "./localRegistry";
 
 /** Pinned public tag (spike verified v0.158.0). Not `latest`: the bundled UI must match the core. */
@@ -154,7 +154,10 @@ export function machineProvider(arch: string = process.arch): string {
   return arch === "arm64" ? "libkrun" : "applehv";
 }
 
-/** The ONLY env podman ever sees: own HOME, short TMPDIR, provider. Nothing inherited (no CONTAINER_HOST etc.). */
+/** The ONLY env podman ever sees: own HOME, short TMPDIR, provider, and the bundled helper dir.
+ * Nothing inherited (no CONTAINER_HOST etc.). CONTAINERS_HELPER_BINARY_DIR makes podman take
+ * gvproxy/vfkit/krunkit from the signed engine next to it; without it podman searches its default
+ * helper dirs first (Homebrew's), so a Mac with brew podman would boot the VM with unbundled helpers. */
 export function podmanEnv(cfg: RuntimeConfig, id: string): Record<string, string> {
   const p = workspacePaths(cfg, id);
   return {
@@ -162,6 +165,7 @@ export function podmanEnv(cfg: RuntimeConfig, id: string): Record<string, string
     TMPDIR: p.tmp,
     PATH: cfg.path,
     CONTAINERS_MACHINE_PROVIDER: machineProvider(cfg.arch),
+    CONTAINERS_HELPER_BINARY_DIR: dirname(cfg.podmanPath),
   };
 }
 

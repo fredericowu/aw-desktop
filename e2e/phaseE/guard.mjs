@@ -11,7 +11,7 @@ const BASE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 export const machineProvider = (arch = process.arch) => (arch === "arm64" ? "libkrun" : "applehv");
 
 /**
- * The COMPLETE environment for a podman call made on behalf of one workspace: exactly the four
+ * The COMPLETE environment for a podman call made on behalf of one workspace: exactly the five
  * variables the app passes (src/main/localRuntime.ts podmanEnv). Nothing is inherited, so XDG_* or
  * CONTAINER_* from the caller can never point the call at the user's real podman config.
  */
@@ -21,6 +21,7 @@ export function workspacePodmanEnv(podmanBin, homesRoot, id, tmpRoot = "/tmp", a
     TMPDIR: join(tmpRoot, `aw-${id}`),
     PATH: `${dirname(podmanBin)}:${BASE_PATH}`,
     CONTAINERS_MACHINE_PROVIDER: machineProvider(arch),
+    CONTAINERS_HELPER_BINARY_DIR: dirname(podmanBin),
   };
 }
 

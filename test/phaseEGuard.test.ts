@@ -4,19 +4,20 @@ import { hostIntegrityError, parseHostMachine, workspacePodmanEnv } from "../e2e
 import { podmanEnv } from "../src/main/localRuntime";
 
 describe("phaseE harness environment", () => {
-  it("passes podman exactly the four variables the app uses, nothing inherited", () => {
+  it("passes podman exactly the five variables the app uses, nothing inherited", () => {
     process.env.XDG_CONFIG_HOME = "/home/real/.config";
     process.env.CONTAINER_HOST = "unix:///real.sock";
     const env = workspacePodmanEnv("/h/podman-dist/podman/bin/podman", "/h/.awd", "local1", "/tmp", "arm64");
-    expect(Object.keys(env).sort()).toEqual(["CONTAINERS_MACHINE_PROVIDER", "HOME", "PATH", "TMPDIR"]);
+    expect(Object.keys(env).sort()).toEqual(["CONTAINERS_HELPER_BINARY_DIR", "CONTAINERS_MACHINE_PROVIDER", "HOME", "PATH", "TMPDIR"]);
     expect(env.HOME).toBe("/h/.awd/local1/home");
     expect(env.TMPDIR).toBe("/tmp/aw-local1");
+    expect(env.CONTAINERS_HELPER_BINARY_DIR).toBe("/h/podman-dist/podman/bin");
     expect(env.CONTAINERS_MACHINE_PROVIDER).toBe("libkrun");
     delete process.env.XDG_CONFIG_HOME;
     delete process.env.CONTAINER_HOST;
   });
   it("uses the same variable names as the app's own podmanEnv", () => {
-    const app = podmanEnv({ path: "/p", arch: "arm64", homesRoot: "/h/.awd", dataRoot: "/h/data", tmpRoot: "/tmp" } as never, "local1");
+    const app = podmanEnv({ podmanPath: "/p/podman", path: "/p", arch: "arm64", homesRoot: "/h/.awd", dataRoot: "/h/data", tmpRoot: "/tmp" } as never, "local1");
     const harness = workspacePodmanEnv("/p/podman", "/h/.awd", "local1", "/tmp", "arm64");
     expect(Object.keys(harness).sort()).toEqual(Object.keys(app).sort());
   });
