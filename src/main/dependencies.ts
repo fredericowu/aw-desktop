@@ -13,7 +13,6 @@ export const PODMAN_PKG_BYTES: Record<string, number> = { arm64: 74802386 };
 export const podmanPkgUrl = (arch: string) =>
   `https://github.com/containers/podman/releases/download/v${PODMAN_VERSION}/podman-installer-macos-${arch}.pkg`;
 
-const mb = (n: number) => `${(n / 1_000_000).toFixed(1)} MB`;
 
 /** What a probe sees. Injectable so the screen logic runs off a Mac. */
 export interface DepProbe {
@@ -26,20 +25,10 @@ export interface Env {
   arch: string;
 }
 
-export function plansFor(env: Env): Record<DepId, DepPlan | undefined> {
-  const arm = env.platform === "darwin" && env.arch === "arm64";
-  return {
-    podman: arm
-      ? {
-          source: podmanPkgUrl("arm64"),
-          size: mb(PODMAN_PKG_BYTES.arm64),
-          checksum: `sha256 ${PODMAN_PKG_SHA256.arm64}`,
-          dest: "inside the AW Desktop app (bundled; nothing is written to your home folder)",
-          needsAdmin: false,
-        }
-      : undefined,
-    machine: undefined,
-  };
+/** The engine is bundled in the app, so there is nothing to download: no plan, no install action.
+ * A missing bundled binary is reported on the row (see `note`), never offered as a download. */
+export function plansFor(_env: Env): Record<DepId, DepPlan | undefined> {
+  return { podman: undefined, machine: undefined };
 }
 
 /** Pure: builds the screen from a probe + in-flight install state. */
@@ -57,6 +46,7 @@ export function buildSnapshot(
       title: "Podman (container runtime)",
       sub: "Setup always needs the podman command. Docker Desktop alone is not enough.",
       required: true,
+      note: "The engine bundled with AW Desktop is missing or damaged. Reinstall AW Desktop.",
     },
     machine: {
       title: "Podman machine",

@@ -13,6 +13,13 @@ describe("bundled engine pin", () => {
     expect(ref).toContain(`ARM64_SHA256=${PODMAN_PKG_SHA256["arm64"]}\n`);
   });
 
+  it("gvproxy is pinned to the patched release, not the pkg's v0.8.9", () => {
+    const ref = read("scripts/engine-ref");
+    expect(ref).toMatch(/^GVPROXY_VERSION=v0\.(9|[1-9]\d)\.\d+$/m);
+    expect(ref).toMatch(/^GVPROXY_SHA256=[0-9a-f]{64}$/m);
+    expect(read("scripts/fetch-engine.sh")).toContain("gvproxy-darwin");
+  });
+
   it("every engine binary is listed for signing and the plist grants what the VM helpers need", () => {
     const yml = read("electron-builder.yml");
     for (const b of ["bin/podman", "bin/gvproxy", "bin/vfkit", "bin/krunkit", "lib/libkrun.dylib", "lib/libvirglrenderer.1.dylib", "lib/libepoxy.0.dylib", "lib/libMoltenVK.dylib"]) {

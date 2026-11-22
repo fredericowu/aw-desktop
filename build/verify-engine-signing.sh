@@ -11,8 +11,8 @@ ent() { codesign -d --entitlements - --xml "$1" 2>/dev/null || true; }
 for f in bin/podman bin/gvproxy bin/vfkit bin/krunkit lib/libkrun.dylib lib/libvirglrenderer.1.dylib lib/libepoxy.0.dylib lib/libMoltenVK.dylib share/krunkit/KRUN_EFI.silent.fd; do
   [ -f "$e/$f" ] || bad "missing $f"
 done
-for f in bin/podman bin/gvproxy bin/vfkit bin/krunkit lib/*.dylib; do
-  p="$e/$f"; [ -f "$p" ] || continue
+for p in "$e"/bin/podman "$e"/bin/gvproxy "$e"/bin/vfkit "$e"/bin/krunkit "$e"/lib/*.dylib; do
+  [ -f "$p" ] || continue; f="${p#"$e"/}"
   d="$(codesign -dvv "$p" 2>&1)" || { bad "$f not signed"; continue; }
   echo "$d" | grep -q "Authority=Developer ID Application" || bad "$f: not Developer ID signed"
   echo "$d" | grep -Eq "flags=0x[0-9a-f]+\(.*runtime" || bad "$f: hardened runtime off"
