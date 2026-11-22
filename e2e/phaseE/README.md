@@ -26,6 +26,7 @@ needs a real Mac and takes several minutes (machine init + image pulls).
 | `AW_E2E_APP` | app bundle | `/Applications/AW Desktop.app` |
 | `AW_E2E_USER_DATA` | app userData dir | `~/Library/Application Support/aw-desktop` |
 | `AW_E2E_PODMAN` | podman binary | `~/podman-dist/podman/bin/podman` |
+| `AW_E2E_RESET_AUTH` | `1` = move `session.*`/`safestorage-*` in the userData dir to a backup subdir before step 5 (a stale `safestorage-disabled` flag breaks the relaunch check). Off by default: the default userData is the installed app's real profile | unset |
 | `AW_E2E_SHOTS` | screenshot/text output | `./.tmp/phaseE-shots` |
 
 ## How to run

@@ -1,7 +1,7 @@
 // Phase E e2e: drives the REAL installed AW Desktop.app (Playwright _electron) through the
 // standalone local-workspace path against real podman. Needs a logged-in macOS GUI session.
 // Usage: AW_E2E_JWT_FILE=<file> node e2e/phaseE/run.mjs [--teardown]   (see README.md)
-import { writeFileSync, rmSync } from "node:fs";
+import { writeFileSync, renameSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { launch, pickerWindow, waitShell, snap, jwt, log, rec, summary, files, keychainItem, UD, sleep, switchWorkspace } from "./common.mjs";
 import { teardown, leftovers, wsState, registryWorkspaces } from "./teardown.mjs";
@@ -23,8 +23,21 @@ const api = (s, path, init) => s.evaluate(async ([u, o]) => { const x = await fe
 // ---- Step 5: Keychain is touched once, only when a session is saved ----
 // A leftover "safestorage-disabled" flag (written by any earlier launch whose Keychain call
 // failed) permanently disables safeStorage, so the relaunch could never decrypt the session.
-// Start every run from a clean auth state.
-for (const f of ["session.bin", "session.json", "safestorage-disabled", "safestorage-attempt"]) rmSync(join(UD, f), { force: true });
+// This touches the app's real profile (UD defaults to the installed app's userData), so it is
+// opt-in (AW_E2E_RESET_AUTH=1) and MOVES the files to a timestamped backup dir instead of deleting
+// them. Point AW_E2E_USER_DATA at a throwaway dir to avoid touching a real session at all.
+const AUTH_FILES = ["session.bin", "session.json", "safestorage-disabled", "safestorage-attempt"];
+if (process.env.AW_E2E_RESET_AUTH === "1") {
+  const present = AUTH_FILES.filter((f) => existsSync(join(UD, f)));
+  if (present.length) {
+    const bak = join(UD, `e2e-auth-backup-${Date.now()}`);
+    mkdirSync(bak, { recursive: true });
+    for (const f of present) renameSync(join(UD, f), join(bak, f));
+    log("auth state moved to", bak, present);
+  }
+} else if (AUTH_FILES.some((f) => existsSync(join(UD, f)))) {
+  log("WARNING: existing auth files in", UD, "- a stale safestorage-disabled flag makes the step 5 relaunch fail; set AW_E2E_RESET_AUTH=1 to back them up and start clean");
+}
 log("keychain item before:", keychainItem(), "files:", files());
 let app = await launch();
 let page = await pickerWindow(app);
