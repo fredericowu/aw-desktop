@@ -1,7 +1,7 @@
 // Phase E e2e: drives the REAL installed AW Desktop.app (Playwright _electron) through the
 // standalone local-workspace path against real podman. Needs a logged-in macOS GUI session.
 // Usage: AW_E2E_JWT_FILE=<file> node e2e/phaseE/run.mjs [--teardown]   (see README.md)
-import { writeFileSync } from "node:fs";
+import { writeFileSync, renameSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { launch, pickerWindow, waitShell, snap, jwt, log, rec, summary, files, keychainItem, UD, sleep, switchWorkspace } from "./common.mjs";
 import { teardown, leftovers, wsState, registryWorkspaces } from "./teardown.mjs";
@@ -11,7 +11,7 @@ const PORT1 = 9031, PORT2 = 9033;
 const NAME1 = "e2e-one", NAME2 = "e2e-two";
 
 async function createWorkspace(p, name) {
-  await p.getByRole("button", { name: /Create new sandbox/ }).first().click();
+  await p.getByRole("button", { name: /Create new (workspace|sandbox)/ }).first().click();
   await p.locator('[data-testid="deps-continue"]').waitFor();
   await p.waitForFunction(() => !document.querySelector('[data-testid="deps-continue"]').disabled);
   await p.locator('[data-testid="deps-continue"]').click();
@@ -21,6 +21,27 @@ async function createWorkspace(p, name) {
 const api = (s, path, init) => s.evaluate(async ([u, o]) => { const x = await fetch(u, o); const t = await x.text(); let b; try { b = JSON.parse(t); } catch { b = t; } return { status: x.status, body: b }; }, [path, init]);
 
 // ---- Step 5: Keychain is touched once, only when a session is saved ----
+// A leftover "safestorage-disabled" flag (written by any earlier launch whose Keychain call
+// failed) permanently disables safeStorage, so the relaunch could never decrypt the session.
+// This touches the app's real profile (UD defaults to the installed app's userData), so it is
+// opt-in (AW_E2E_RESET_AUTH=1) and MOVES the files to a timestamped backup dir instead of deleting
+// them. The app is launched with --user-data-dir=<UD>, so the harness and Electron always share one
+// profile. Point AW_E2E_USER_DATA at a throwaway dir to avoid touching a real session at all.
+// session.json is the legacy PLAINTEXT token: it is never copied into a backup. If one exists the
+// run refuses to reset and asks for an isolated profile instead.
+const AUTH_FILES = ["session.bin", "safestorage-disabled", "safestorage-attempt"];
+if (process.env.AW_E2E_RESET_AUTH === "1") {
+  if (existsSync(join(UD, "session.json"))) throw new Error(`${join(UD, "session.json")} holds a plaintext session token; refusing to back it up or delete it. Use an isolated AW_E2E_USER_DATA dir.`);
+  const present = AUTH_FILES.filter((f) => existsSync(join(UD, f)));
+  if (present.length) {
+    const bak = join(UD, `e2e-auth-backup-${Date.now()}`);
+    mkdirSync(bak, { recursive: true });
+    for (const f of present) renameSync(join(UD, f), join(bak, f));
+    log("auth state moved to", bak, present);
+  }
+} else if (AUTH_FILES.some((f) => existsSync(join(UD, f)))) {
+  log("WARNING: existing auth files in", UD, "- a stale safestorage-disabled flag makes the step 5 relaunch fail; set AW_E2E_RESET_AUTH=1 to back them up and start clean");
+}
 log("keychain item before:", keychainItem(), "files:", files());
 let app = await launch();
 let page = await pickerWindow(app);
@@ -77,7 +98,7 @@ page = await pickerWindow(app);
 await page.bringToFront();
 await page.waitForSelector('[data-testid="local-block"]');
 rec("s6: picker shows 2/2", (await page.locator('[data-testid="local-badge"]').innerText()) === "2/2");
-await page.getByRole("button", { name: /Create new sandbox/ }).first().click();
+await page.getByRole("button", { name: /Create new (workspace|sandbox)/ }).first().click();
 await sleep(1500);
 const dialogs = await page.locator(".modal").allInnerTexts();
 rec("s6: third create is refused by the free-tier cap, wizard not shown", /free-tier limit/i.test(dialogs.join(" ")) && (await page.locator("#sandbox-name").count()) === 0);

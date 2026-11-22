@@ -24,8 +24,9 @@ needs a real Mac and takes several minutes (machine init + image pulls).
 |---|---|---|
 | `AW_E2E_JWT_FILE` | **required**, file holding the test-account JWT | none |
 | `AW_E2E_APP` | app bundle | `/Applications/AW Desktop.app` |
-| `AW_E2E_USER_DATA` | app userData dir | `~/Library/Application Support/aw-desktop` |
+| `AW_E2E_USER_DATA` | app userData dir (the app is launched with `--user-data-dir` set to it, so harness and app share it; use a throwaway dir to leave your real profile alone) | `~/Library/Application Support/aw-desktop` |
 | `AW_E2E_PODMAN` | podman binary | `~/podman-dist/podman/bin/podman` |
+| `AW_E2E_RESET_AUTH` | `1` = move `session.bin`/`safestorage-*` in the userData dir to a backup subdir before step 5 (a stale `safestorage-disabled` flag breaks the relaunch check). Refuses to run if a plaintext `session.json` exists. Off by default: the default userData is the installed app's real profile | unset |
 | `AW_E2E_SHOTS` | screenshot/text output | `./.tmp/phaseE-shots` |
 
 ## How to run

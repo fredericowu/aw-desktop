@@ -28,7 +28,7 @@ export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export const files = () => (existsSync(UD) ? readdirSync(UD).filter((f) => /session|safestorage|identity|local/i.test(f)) : []);
 export const keychainItem = () => { try { execFileSync("security", ["find-generic-password", "-s", "AW Desktop Safe Storage"], { stdio: "pipe" }); return "present"; } catch { return "absent"; } };
 
-export const launch = () => electron.launch({ executablePath: EXE, args: [], env: { ...process.env } });
+export const launch = () => electron.launch({ executablePath: EXE, args: [`--user-data-dir=${UD}`], env: { ...process.env } });
 export async function pickerWindow(app) {
   for (let i = 0; i < 100; i++) {
     const w = app.windows().find((x) => !x.url().startsWith("http://127.0.0.1"));
