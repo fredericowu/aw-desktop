@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { FAILURE_COPY, PHASE_LABEL, failureCopy, lowDiskCopy } from "../src/shared/errorCopy";
+import { FAILURE_COPY, PHASE_LABEL, SUPERVISOR_COPY, failureCopy, lowDiskCopy } from "../src/shared/errorCopy";
 import { STEP_LABEL } from "../src/shared/bootstrapState";
 import { runPreflight } from "../src/main/preflightCore";
 
@@ -12,6 +12,7 @@ describe("user-facing wording", () => {
   const strings = [
     ...Object.values(FAILURE_COPY),
     ...Object.values(PHASE_LABEL),
+    ...Object.values(SUPERVISOR_COPY),
     ...Object.values(STEP_LABEL),
     lowDiskCopy(),
     lowDiskCopy(12),

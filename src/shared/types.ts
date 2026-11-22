@@ -25,6 +25,8 @@ export interface WorkspaceInfo {
   remote_host_id?: string | null;
   /** Local (desktop-managed) rows only: the name the user typed (`name` is the registry id). */
   display_name?: string;
+  /** Local rows only: plain-language line for "starting" / "needs_attention" (never raw engine text). */
+  detail?: string;
 }
 
 /** GET /api/accounts/me — limits + local_count are added by aw-backend's
@@ -104,6 +106,8 @@ export interface AwBridge {
   /** Recent diagnostics text for support, copied to the clipboard by main. Resolves false if there is nothing to copy. */
   copyDiagnostics(): Promise<boolean>;
   logout(): Promise<void>;
+  /** A local workspace changed status (supervisor recovery); main sends the updated local row (no hosted API call needed). */
+  onWorkspaceStatus(cb: (row: WorkspaceInfo) => void): () => void;
   onStateChanged(cb: (state: AuthState) => void): () => void;
 }
 
