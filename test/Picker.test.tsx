@@ -68,8 +68,8 @@ describe("Picker landing", () => {
     render(<Picker state={state} />);
     await screen.findByTestId("local-block");
     expect(screen.getByTestId("local-badge").textContent).toBe("0/2");
-    expect(screen.getByText("No local sandboxes yet — create one to get started.")).toBeTruthy();
-    expect(screen.getByText("No cloud sandboxes yet.")).toBeTruthy();
+    expect(screen.getByText("No local workspaces yet — create one to get started.")).toBeTruthy();
+    expect(screen.getByText("No cloud workspaces yet.")).toBeTruthy();
   });
 
   it("Cloud create is truly disabled, captioned, and never calls the API", async () => {
@@ -197,8 +197,8 @@ describe("review fixes", () => {
     await waitFor(() => expect(b.depsList).toHaveBeenCalled());
     await waitFor(() => expect((screen.getByTestId("deps-continue") as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByTestId("deps-continue"));
-    fireEvent.change(screen.getByPlaceholderText("my-sandbox"), { target: { value: "x" } });
-    fireEvent.click(screen.getByText("Create sandbox"));
+    fireEvent.change(screen.getByPlaceholderText("my-workspace"), { target: { value: "x" } });
+    fireEvent.click(screen.getByText("Create workspace"));
     await screen.findByText("Creating…");
     expect((screen.getByText("Cancel") as HTMLButtonElement).disabled).toBe(true);
     release({ ok: true, data: ws({ name: "x" }) });
@@ -268,8 +268,8 @@ describe("guided create", () => {
     await openWizard(b);
     await waitFor(() => expect((screen.getByTestId("deps-continue") as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByTestId("deps-continue"));
-    fireEvent.change(screen.getByLabelText("Sandbox name"), { target: { value: "  box1 " } });
-    fireEvent.click(screen.getByText("Create sandbox"));
+    fireEvent.change(screen.getByLabelText("Workspace name"), { target: { value: "  box1 " } });
+    fireEvent.click(screen.getByText("Create workspace"));
     await waitFor(() => expect(b.createLocalWorkspace).toHaveBeenCalledWith("box1"));
     // closes and reloads the list
     await waitFor(() => expect(b.listWorkspaces).toHaveBeenCalledTimes(2));
@@ -283,8 +283,8 @@ describe("guided create", () => {
     await openWizard(b);
     await waitFor(() => expect((screen.getByTestId("deps-continue") as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByTestId("deps-continue"));
-    fireEvent.change(screen.getByLabelText("Sandbox name"), { target: { value: "box3" } });
-    fireEvent.click(screen.getByText("Create sandbox"));
+    fireEvent.change(screen.getByLabelText("Workspace name"), { target: { value: "box3" } });
+    fireEvent.click(screen.getByText("Create workspace"));
     await screen.findByText("You've hit your free-tier limit");
   });
 });
