@@ -78,12 +78,12 @@ await snap(page, "05-cloud-disabled");
 // (no shipped test hook): depsList/depsInstall -> a scripted state machine.
 // Nothing is installed and Create is never clicked.
 await app.evaluate(({ ipcMain }) => {
-  const st = { podman: "missing", progress: 0, installs: [] };
+  const st = { podman: "missing", progress: 0, installs: [], listCalls: 0, callTs: [] };
   globalThis.__deps = st;
   const plan = (id) => ({ source: "https://example.invalid/" + id, size: "1.0 MB", checksum: "sha256 e2e", dest: "~/e2e", needsAdmin: false });
   const item = (id, title, state, extra = {}) => ({ id, title, sub: "", required: id !== "machine", state, plan: state === "installed" || id === "machine" ? undefined : plan(id), ...extra });
   ipcMain.removeHandler("aw:depsList");
-  ipcMain.handle("aw:depsList", () => ({ platform: "darwin", supported: true,
+  ipcMain.handle("aw:depsList", () => (globalThis.__deps.listCalls++, globalThis.__deps.callTs.push(Date.now()), { platform: "darwin", supported: true,
     items: [item("podman", "Podman", st.podman, st.podman === "installing" ? { progress: st.progress } : {}), item("machine", "Podman machine", "missing")],
     ready: st.podman === "installed" }));
   ipcMain.removeHandler("aw:depsInstall");
@@ -92,27 +92,37 @@ await app.evaluate(({ ipcMain }) => {
 await page.locator('[data-testid="local-block"]').getByRole("button", { name: /Create/ }).first().click();
 await page.waitForSelector('[data-testid="deps"]', { timeout: 20000 });
 await snap(page, "06-deps-missing");
-const stateOf = (id) => page.locator(`[data-testid="dep-${id}"]`).getAttribute("data-state");
+// Playwright's page.waitForFunction evals a string, which the signed app's CSP (no unsafe-eval) refuses; poll via locators instead.
+const until = async (check, timeout, what) => { const end = Date.now() + timeout; while (Date.now() < end) { if (await check()) return true; await new Promise((r) => setTimeout(r, 50)); } throw new Error("timeout waiting for " + what); };
+// Bounded lookup: a missing row yields null after 500ms instead of waiting out Playwright's default timeout past the helper's deadline.
+const stateOf = (id) => page.locator(`[data-testid="dep-${id}"]`).getAttribute("data-state", { timeout: 500 }).catch(() => null);
 const cont = page.locator('[data-testid="deps-continue"]');
 rec("deps: podman listed as missing, no host row, Continue disabled", (await stateOf("podman")) === "missing" && (await page.locator('[data-testid="dep-host"]').count()) === 0 && (await cont.isDisabled()));
 const planTxt = await page.locator('[data-testid="dep-podman-plan"]').innerText();
 rec("deps: plan shows URL, size, checksum before any install", /example\.invalid\/podman/.test(planTxt) && /1\.0 MB/.test(planTxt) && /sha256/.test(planTxt), planTxt.replace(/\s+/g, " "));
 rec("deps: nothing installed without a click", (await app.evaluate(() => globalThis.__deps.installs.length)) === 0);
 await page.locator('[data-testid="dep-podman-install"]').click();
-await page.waitForFunction(() => document.querySelector('[data-testid="dep-podman"]')?.getAttribute("data-state") === "installing", null, { timeout: 8000 });
+await until(async () => (await stateOf("podman")) === "installing", 8000, "podman installing");
 rec("deps: click -> installing with progress (approved=true sent)", JSON.stringify(await app.evaluate(() => globalThis.__deps.installs)) === JSON.stringify([["podman", true]]) && /40%/.test(await page.locator('[data-testid="dep-podman-state"]').innerText()));
 await snap(page, "07-deps-installing");
+// Manual Re-check, independent of the 3s poll. After a poll tick the next poll is ~3s away; flip the stub and click at once,
+// then require that the first depsList call after the flip happened well inside that gap (so it was the click, not a poll)
+// and that the row updated. A slow click that overruns the gap fails instead of passing on a poll.
+// E2E_NEGATIVE_RECHECK=1 skips the click: this step must then FAIL (negative control).
 await app.evaluate(() => { globalThis.__deps.podman = "installed"; });
-// Manual Re-check: flip the stub back to missing and click; must update well inside the 3s poll interval.
-await app.evaluate(() => { globalThis.__deps.podman = "missing"; });
-await page.locator('[data-testid="deps-recheck"]').click();
-const tRc = Date.now();
-await page.waitForFunction(() => document.querySelector('[data-testid="dep-podman"]')?.getAttribute("data-state") === "missing", null, { timeout: 2500, polling: 50 }).catch(() => {});
-rec("deps: Re-check click updates immediately (before the 3s poll)", (await stateOf("podman")) === "missing" && Date.now() - tRc < 2500);
+await until(async () => (await stateOf("podman")) === "installed", 10000, "podman installed via poll");
+const calls0 = await app.evaluate(() => globalThis.__deps.listCalls);
+await until(async () => (await app.evaluate(() => globalThis.__deps.listCalls)) > calls0, 6000, "next poll tick");
+const tickTs = await app.evaluate(() => globalThis.__deps.callTs.at(-1));
+const flipTs = await app.evaluate(() => { globalThis.__deps.podman = "missing"; return Date.now(); });
+if (process.env.E2E_NEGATIVE_RECHECK !== "1") await page.locator('[data-testid="deps-recheck"]').click();
+await until(async () => (await stateOf("podman")) === "missing", 1000, "Re-check click update").catch(() => {});
+const rcCall = await app.evaluate((f) => globalThis.__deps.callTs.find((t) => t > f) ?? null, flipTs);
+rec("deps: Re-check click updates immediately (before the 3s poll)", (await stateOf("podman")) === "missing" && rcCall !== null && rcCall - tickTs < 2500, `tick->call ${rcCall === null ? "none" : rcCall - tickTs}ms`);
 await app.evaluate(() => { globalThis.__deps.podman = "installed"; });
-await page.waitForFunction(() => document.querySelector('[data-testid="dep-podman"]')?.getAttribute("data-state") === "installed", null, { timeout: 10000 });
+await until(async () => (await stateOf("podman")) === "installed", 10000, "podman installed");
 rec("deps: flips to installed on its own (3s poll, no click)", true);
-await page.waitForFunction(() => !document.querySelector('[data-testid="deps-continue"]').disabled, null, { timeout: 8000 });
+await until(async () => !(await cont.isDisabled()), 8000, "Continue enabled");
 rec("deps: Continue enabled only when all required are installed", true);
 await snap(page, "08-deps-ready");
 await cont.click();
