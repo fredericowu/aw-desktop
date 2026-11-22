@@ -81,6 +81,8 @@ export class LocalWorkspaces {
   private readonly supervisor: Supervisor;
   private timer: ReturnType<typeof setInterval> | null = null;
   private hooks: SupervisorHooks | null = null;
+  private shuttingDown = false;
+  private recovering: Promise<unknown> | null = null;
 
   constructor(getToken: () => string | null, fetchMaxLocal: (token: string) => Promise<number | undefined>) {
     const userData = app.getPath("userData");
@@ -115,14 +117,25 @@ export class LocalWorkspaces {
     return this.supervisor.tick();
   }
 
-  private async recover(id: string): Promise<RecoverOutcome> {
+  private recover(id: string): Promise<RecoverOutcome> {
+    const p = this.recoverNow(id);
+    this.recovering = p;
+    return p.finally(() => {
+      if (this.recovering === p) this.recovering = null;
+    });
+  }
+
+  private async recoverNow(id: string): Promise<RecoverOutcome> {
     const hooks = this.hooks;
     const ws = this.registry.get(id);
-    if (!hooks || !ws) return "busy";
+    if (!hooks || !ws || this.shuttingDown) return "busy";
     return hooks.exclusive(async () => {
-      // The user may have stopped or removed it while we waited for the slot.
-      if (!this.supervisor.watching(id) || !this.registry.get(id)) return;
-      await this.runtime.start(ws, { authPublicKey: await hooks.authKey(), recover: true });
+      // The user may have stopped or removed it, or the app started quitting, while we waited for the slot.
+      const live = () => this.supervisor.watching(id) && !!this.registry.get(id) && !this.shuttingDown;
+      if (!live()) return;
+      const authPublicKey = await hooks.authKey();
+      if (!live()) return;
+      await this.runtime.start(ws, { authPublicKey, recover: true });
     });
   }
 
@@ -173,7 +186,9 @@ export class LocalWorkspaces {
       if (p === cur.uiPort) return !!front && front.server.listening;
       return p === cur.apiPort && this.running.has(id);
     });
-    await this.runtime.start(workspace, { authPublicKey, onStep: (s) => onStep(stepFor(s)) });
+    // Retry after "needs attention": the core may still be running but hung, so use recovery rules.
+    const recover = this.needsAttention(id);
+    await this.runtime.start(workspace, { authPublicKey, recover, onStep: (s) => onStep(stepFor(s)) });
     await this.fronts.get(id)?.close();
     const front = createFrontServer({ uiPort: workspace.uiPort, apiPort: workspace.apiPort, staticDir: uiStaticDir() });
     await front.listen();
@@ -197,9 +212,12 @@ export class LocalWorkspaces {
 
   /** Stop every running workspace (app quit). Best effort per workspace so one failure does not strand the rest. */
   async stopAll(): Promise<void> {
+    this.shuttingDown = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.supervisor.unwatchAll();
+    // A recovery already past its checks may be mid `machine start`: wait for it so we stop what it started.
+    await this.recovering?.catch(() => undefined);
     const ids = [...this.running];
     for (const id of ids) {
       try {
@@ -236,5 +254,14 @@ export async function identityPublicKey(): Promise<string> {
   } catch (err) {
     if (existsSync(keyFile())) return readFileSync(keyFile(), "utf8");
     throw err;
+  }
+}
+
+/** The cached key, or null. Recovery reads this first so a stalled identity endpoint cannot hold the setup slot. */
+export function cachedIdentityPublicKey(): string | null {
+  try {
+    return existsSync(keyFile()) ? readFileSync(keyFile(), "utf8") : null;
+  } catch {
+    return null;
   }
 }

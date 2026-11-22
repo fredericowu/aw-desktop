@@ -41,12 +41,12 @@ export function Picker({ state }: { state: AuthState }) {
     void window.aw.getBootstrapProgress().then((p) => p && p.phase !== "done" && setProgress(p));
     return window.aw.onBootstrapProgress(setProgress);
   }, []);
-  // Supervisor recovery changes a row's status without any user action: re-list quietly.
+  // Supervisor recovery changes a row's status without any user action: merge the row main sends.
   useEffect(() => {
-    return window.aw.onWorkspaceStatus?.(() => {
-      void window.aw.listWorkspaces().then((res) => {
-        if (res.ok && res.data) setLoad({ phase: "ready", workspaces: res.data.workspaces, account: res.data.account });
-      });
+    return window.aw.onWorkspaceStatus?.((row) => {
+      setLoad((cur) =>
+        cur.phase === "ready" ? { ...cur, workspaces: cur.workspaces.map((w) => (w.name === row.name ? row : w)) } : cur,
+      );
     });
   }, []);
 

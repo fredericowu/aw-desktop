@@ -106,8 +106,8 @@ export interface AwBridge {
   /** Recent diagnostics text for support, copied to the clipboard by main. Resolves false if there is nothing to copy. */
   copyDiagnostics(): Promise<boolean>;
   logout(): Promise<void>;
-  /** A local workspace changed status (supervisor recovery); the picker re-lists. */
-  onWorkspaceStatus(cb: (slug: string) => void): () => void;
+  /** A local workspace changed status (supervisor recovery); main sends the updated local row (no hosted API call needed). */
+  onWorkspaceStatus(cb: (row: WorkspaceInfo) => void): () => void;
   onStateChanged(cb: (state: AuthState) => void): () => void;
 }
 

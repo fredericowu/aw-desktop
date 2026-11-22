@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { AwBridge, AuthState, BootstrapProgress } from "../shared/types";
+import type { AwBridge, AuthState, BootstrapProgress, WorkspaceInfo } from "../shared/types";
 
 const bridge: AwBridge = {
   getState: () => ipcRenderer.invoke("aw:getState"),
@@ -20,8 +20,8 @@ const bridge: AwBridge = {
     ipcRenderer.on("aw:bootstrap-progress", listener);
     return () => ipcRenderer.removeListener("aw:bootstrap-progress", listener);
   },
-  onWorkspaceStatus: (cb: (slug: string) => void) => {
-    const listener = (_event: unknown, slug: string) => cb(slug);
+  onWorkspaceStatus: (cb: (row: WorkspaceInfo) => void) => {
+    const listener = (_event: unknown, row: WorkspaceInfo) => cb(row);
     ipcRenderer.on("aw:workspace-status", listener);
     return () => ipcRenderer.removeListener("aw:workspace-status", listener);
   },

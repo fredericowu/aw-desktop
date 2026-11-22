@@ -114,6 +114,19 @@ describe("Picker landing", () => {
     await waitFor(() => expect(b.finishLocalSetup).toHaveBeenCalledWith("localbb"));
   });
 
+  it("a status event carries the row, so it updates without any hosted list call", async () => {
+    let emit: (r: WorkspaceInfo) => void = () => undefined;
+    const b = bridge({
+      workspaces: [ws({ name: "localaa", display_name: "A", status: "running" })],
+      onWorkspaceStatus: vi.fn((cb: (r: WorkspaceInfo) => void) => ((emit = cb), () => undefined)),
+    });
+    render(<Picker state={state} />);
+    await screen.findByTestId("here-localaa");
+    b.listWorkspaces.mockImplementation(async () => ({ ok: false, error: "hosted outage" }));
+    emit(ws({ name: "localaa", display_name: "A", status: "needs_attention", detail: "This workspace needs attention. Retry, or copy details for support." }));
+    expect(await screen.findByTestId("attention-localaa")).toBeTruthy();
+  });
+
   it("a done snapshot from main does not resurface the ready modal when the picker remounts", async () => {
     bridge({
       getBootstrapProgress: vi.fn(async (): Promise<BootstrapProgress | null> => ({

@@ -13,7 +13,7 @@ import { preflight } from "./preflight";
 import { classifyError, looksLikeEngineText, type ClassifiedError } from "./errorClassifier";
 import { appendDiagnostic, readDiagnosticTail } from "./diagnostics";
 import { PodmanCommandError } from "./localRuntime";
-import { LocalWorkspaces, identityPublicKey } from "./localWorkspaces";
+import { LocalWorkspaces, cachedIdentityPublicKey, identityPublicKey } from "./localWorkspaces";
 import { LocalLimitReachedError } from "./localRegistry";
 import { openIfCurrent, SessionScope, type SessionHandle, SetupSlot, scopedExclusive } from "./localBootstrap";
 import { advance, complete, fail, startProgress } from "../shared/bootstrapState";
@@ -273,9 +273,11 @@ function startLocalSupervisor(): void {
         setupSlot.release();
       }
     },
-    onStatus: (id) => liveAuthWindow()?.webContents.send("aw:workspace-status", id),
+    onStatus: (id) => {
+      if (local.registry.get(id)) liveAuthWindow()?.webContents.send("aw:workspace-status", local_row(id));
+    },
     onFailure: (_id, err) => void logFailure("supervisor_recover", err),
-    authKey: () => identityPublicKey(),
+    authKey: async () => cachedIdentityPublicKey() ?? (await identityPublicKey()),
   });
   // A force-quit leaves VMs running: stop them unless something already started.
   if (setupSlot.claim()) {

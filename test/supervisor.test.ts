@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { Supervisor, type RecoverOutcome, type SupervisedStatus } from "../src/main/supervisorCore";
 import { LocalRuntime, type FsOps, type RunResult, type RuntimeConfig } from "../src/main/localRuntime";
 import type { LocalWorkspace } from "../src/main/localRegistry";
-import { toWorkspaceInfo } from "../src/main/localWorkspaces";
+import { LocalWorkspaces, toWorkspaceInfo } from "../src/main/localWorkspaces";
 import { SUPERVISOR_COPY } from "../src/shared/errorCopy";
 
 
@@ -258,5 +258,57 @@ describe("LocalRuntime recovery", () => {
     run.run = async (c, a, o) => (a.join(" ").startsWith("machine start") ? { code: 125, stdout: "", stderr: "unable to connect to gvproxy socket" } : orig(c, a, o));
     await expect(h.rt.start(ws, { recover: true })).rejects.toThrow(/gvproxy/);
     expect(h.cmds.some((c) => /machine (rm|init)/.test(c))).toBe(false);
+  });
+});
+
+// ---- LocalWorkspaces wiring (review round 1) ----
+describe("LocalWorkspaces supervision wiring", () => {
+  const rec: LocalWorkspace = { id: "localaaa", name: "Box", sub: "1", uiPort: 9031, apiPort: 9032, createdAt: "t", cloud: "none" };
+  const make = () => {
+    const w = new LocalWorkspaces(() => null, async () => undefined);
+    vi.spyOn(w.registry, "get").mockReturnValue(rec);
+    vi.spyOn(w.registry, "reconcilePorts").mockResolvedValue({ workspace: rec } as never);
+    return w;
+  };
+
+  it("Retry after needs attention starts in recovery mode (restarts a running-but-hung core)", async () => {
+    const w = make();
+    const start = vi.spyOn(w.runtime, "start").mockRejectedValue(new Error("stop here"));
+    vi.spyOn(w, "needsAttention").mockReturnValue(true);
+    await expect(w.start("localaaa", "k", () => undefined)).rejects.toThrow("stop here");
+    expect(start.mock.calls[0][1]).toMatchObject({ recover: true });
+    vi.spyOn(w, "needsAttention").mockReturnValue(false);
+    await expect(w.start("localaaa", "k", () => undefined)).rejects.toThrow("stop here");
+    expect(start.mock.calls[1][1]).toMatchObject({ recover: false });
+  });
+
+  it("quit waits for a recovery that is mid-start and then stops what it started", async () => {
+    const w = make();
+    const order: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    vi.spyOn(w.runtime, "start").mockImplementation(async () => (order.push("start"), await gate, order.push("started")));
+    vi.spyOn(w.runtime, "stop").mockImplementation(async () => void order.push("stop"));
+    (w as unknown as { running: Set<string> }).running.add("localaaa");
+    w.startSupervisor({ exclusive: async (work) => (await work(), "ok"), onStatus() {}, onFailure() {}, authKey: async () => "k" }, 3_600_000);
+    const sup = (w as unknown as { supervisor: Supervisor }).supervisor;
+    sup.watch("localaaa");
+    const rec1 = (w as unknown as { recover(id: string): Promise<RecoverOutcome> }).recover("localaaa");
+    await new Promise((r) => setTimeout(r, 0));
+    const quit = w.stopAll();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(order).toEqual(["start"]); // stop must not run while recovery is mid-start
+    release();
+    await Promise.all([rec1.catch(() => undefined), quit]);
+    expect(order).toEqual(["start", "started", "stop"]);
+  });
+
+  it("recovery that has not started yet does nothing once quit began", async () => {
+    const w = make();
+    const start = vi.spyOn(w.runtime, "start").mockResolvedValue();
+    w.startSupervisor({ exclusive: async (work) => (await work(), "ok"), onStatus() {}, onFailure() {}, authKey: async () => "k" }, 3_600_000);
+    await w.stopAll();
+    await (w as unknown as { recover(id: string): Promise<RecoverOutcome> }).recover("localaaa");
+    expect(start).not.toHaveBeenCalled();
   });
 });
