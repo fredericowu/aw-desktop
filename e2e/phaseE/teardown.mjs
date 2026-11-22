@@ -1,5 +1,8 @@
-// Teardown + leftovers checks for the Phase E run. Removes only what this run created
-// (workspaces named in the app's own registry), then verifies nothing is left behind.
+// Teardown + leftovers checks for the Phase E run. The run registers every workspace it creates
+// with adopt(name) (the id comes from the registry entry for the name the harness itself chose);
+// teardown and leftovers touch ONLY those adopted ids. A workspace some other Desktop profile
+// creates mid-run is never adopted, so it is never deleted or reported. snapshot() additionally
+// records the busy ports before the run so they are excluded from the port check.
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -20,16 +23,57 @@ const podmanEnv = (id) => ({ HOME: join(HOMES, id, "home"), TMPDIR: join("/tmp",
 // side effect, which then shows up as a leftover caused by the check itself.
 const podmanFor = (id, args) => (existsSync(podmanEnv(id).HOME) ? run(PODMAN, args, podmanEnv(id)) : { code: 0, out: "" });
 
+const listening = (p) => run("lsof", ["-nP", `-iTCP:${p}`, "-sTCP:LISTEN"]).out.trim() !== "";
+let baseline = null;
+// Ids of workspaces this run created. Kept for the whole run (never dropped after teardown), so the
+// leftovers checks can still look for a workspace whose removal failed.
+const adopted = new Set();
+let removalFailures = [];
+/** Call once before the run creates anything. */
+export function snapshot() {
+  baseline = { ids: new Set(registry().workspaces.map((w) => w.id)), ports: new Set(PORTS.filter(listening)) };
+  log("baseline ports (excluded from the port check):", [...baseline.ports]);
+}
+/**
+ * Wait for the registry entry of the workspace this run just created (by the unique name the harness
+ * gave it), remember its id as run-owned and return it ({id, uiPort, ...}). The port to wait on must
+ * come from here: a stopped workspace elsewhere can reserve 9031/9032, so the new one may not get them.
+ */
+export async function adopt(name, timeoutMs = 60000) {
+  if (!baseline) throw new Error("teardown.snapshot() must run before the run creates workspaces");
+  const end = Date.now() + timeoutMs;
+  for (;;) {
+    const w = registry().workspaces.find((x) => x.name === name && !baseline.ids.has(x.id));
+    if (w) { adopted.add(w.id); return w; }
+    if (Date.now() > end) throw new Error(`no new registry entry named ${name} appeared within ${timeoutMs}ms`);
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+const owned = () => {
+  if (!baseline) throw new Error("teardown.snapshot() must run before the run creates workspaces; refusing to guess what is safe to delete");
+  return [...adopted];
+};
+const GONE = /no such|does not exist|not found|cannot find/i;
+
 export async function teardown() {
-  const ids = new Set([...registry().workspaces.map((w) => w.id), ...dirs(HOMES, /^local/), ...dirs(DATA, /^local/)]);
-  for (const id of ids) {
-    if (!/^local/.test(id)) continue;
+  removalFailures = [];
+  const keep = new Set();
+  for (const id of owned()) {
     log("teardown", id);
-    run(PODMAN, ["machine", "rm", "--force", `aw-${id}`], podmanEnv(id));
+    // Only delete the dirs (the handle podmanFor needs to find the VM again) once podman confirms the
+    // machine is gone; otherwise keep them so leftovers() still reports the surviving machine.
+    const r = podmanFor(id, ["machine", "rm", "--force", `aw-${id}`]);
+    if (r.code !== 0 && !GONE.test(r.out)) {
+      removalFailures.push(`${id}: podman machine rm exit ${r.code}: ${r.out.trim().slice(0, 200)}`);
+      keep.add(id);
+      continue;
+    }
     for (const p of [join(HOMES, id), join(DATA, id), join("/tmp", `aw-${id}`)]) rmSync(p, { recursive: true, force: true });
   }
-  // The app has no in-app removal of a local workspace (known gap), so the registry is emptied here.
-  writeFileSync(REGISTRY, JSON.stringify({ ...registry(), workspaces: [] }, null, 2));
+  // Drop only registry entries of run-owned ids whose machine is gone; everything else stays.
+  const reg = registry();
+  const drop = new Set([...adopted].filter((id) => !keep.has(id)));
+  writeFileSync(REGISTRY, JSON.stringify({ ...reg, workspaces: reg.workspaces.filter((w) => !drop.has(w.id)) }, null, 2));
 }
 
 /** Everything one workspace id owns on this Mac (empty/false fields mean it is fully gone). */
@@ -39,28 +83,29 @@ export function wsState(id, ports = []) {
   const nets = podmanFor(id, ["network", "ls", "--format", "{{.Name}}"]).out.split("\n").map((l) => l.trim()).filter((n) => n && n !== "podman");
   const procs = run("pgrep", ["-fl", `aw-${id}`]).out.split("\n").filter((l) => l.includes(`aw-${id}`) && !l.includes("pgrep"));
   const dirsLeft = [join(HOMES, id), join(DATA, id), join("/tmp", `aw-${id}`)].filter((d) => existsSync(d));
-  const listening = ports.filter((p) => run("lsof", ["-nP", `-iTCP:${p}`, "-sTCP:LISTEN"]).out.trim() !== "");
-  return { machines, ctrs, nets, procs, dirsLeft, listening, inRegistry: registry().workspaces.some((w) => w.id === id) };
+  const busy = ports.filter(listening);
+  return { machines, ctrs, nets, procs, dirsLeft, listening: busy, inRegistry: registry().workspaces.some((w) => w.id === id) };
 }
 export const registryWorkspaces = () => registry().workspaces;
 
 export async function leftovers() {
-  const ids = [...new Set([...dirs(HOMES, /^local/), ...registry().workspaces.map((w) => w.id)])];
+  const ids = owned();
   const machines = [];
   for (const id of ids) {
     const r = podmanFor(id, ["machine", "list", "--format", "{{.Name}}"]);
-    machines.push(...r.out.split("\n").map((l) => l.trim().replace(/\*$/, "")).filter((n) => n.startsWith("aw-local")));
+    machines.push(...r.out.split("\n").map((l) => l.trim().replace(/\*$/, "")).filter((n) => n === `aw-${id}`));
   }
-  const ctrs = run("pgrep", ["-fl", "aw-local"]).out.split("\n").filter((l) => l.includes("aw-local") && !l.includes("pgrep"));
-  const ports = PORTS.filter((p) => run("lsof", ["-nP", `-iTCP:${p}`, "-sTCP:LISTEN"]).out.trim() !== "");
-  const left = [...dirs(HOMES, /^local/).map((d) => `${HOMES}/${d}`), ...dirs(DATA, /^local/).map((d) => `${DATA}/${d}`), ...dirs("/tmp", /^aw-local/).map((d) => `/tmp/${d}`)];
-  const reg = registry().workspaces;
+  const ctrs = ids.flatMap((id) => run("pgrep", ["-fl", `aw-${id}`]).out.split("\n").filter((l) => l.includes(`aw-${id}`) && !l.includes("pgrep")));
+  const ports = PORTS.filter((p) => !baseline.ports.has(p) && listening(p));
+  const left = ids.flatMap((id) => [join(HOMES, id), join(DATA, id), join("/tmp", `aw-${id}`)].filter((d) => existsSync(d)));
+  const reg = registry().workspaces.filter((w) => ids.includes(w.id));
   const res = (ok, detail) => ({ ok, detail: ok ? "none" : detail });
   return {
-    "podman machines (aw-local*)": res(machines.length === 0, machines.join(",")),
-    "aw-local* containers/processes": res(ctrs.length === 0, ctrs.join(" | ")),
-    "ports 9031-9034 free": res(ports.length === 0, ports.join(",")),
+    "podman machine removal succeeded": res(removalFailures.length === 0, removalFailures.join(" | ")),
+    "podman machines (run-created)": res(machines.length === 0, machines.join(",")),
+    "run-created containers/processes": res(ctrs.length === 0, ctrs.join(" | ")),
+    "ports 9031-9034 free (excluding pre-existing)": res(ports.length === 0, ports.join(",")),
     "data/home/tmp dirs gone": res(left.length === 0, left.join(",")),
-    "registry empty": res(reg.length === 0, reg.map((w) => w.id).join(",")),
+    "registry has no run-created entries": res(reg.length === 0, reg.map((w) => w.id).join(",")),
   };
 }
