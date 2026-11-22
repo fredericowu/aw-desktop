@@ -47,6 +47,7 @@ function bridge(over: Partial<AwBridge> & { workspaces?: WorkspaceInfo[]; localC
     createLocalWorkspace: vi.fn(async (name: string): Promise<ApiResult<WorkspaceInfo>> => ({ ok: true, data: ws({ name }) })),
     pickWorkspace: vi.fn(async () => ({ ok: true })),
     finishLocalSetup: vi.fn(async () => ({ ok: true, data: null })),
+    removeLocalWorkspace: vi.fn(async () => ({ ok: true, data: null })),
     getBootstrapProgress: vi.fn(async (): Promise<BootstrapProgress | null> => null),
     onBootstrapProgress: vi.fn((cb: (p: BootstrapProgress) => void) => {
       emitProgress = cb;
@@ -306,5 +307,78 @@ describe("Picker open failure", () => {
     (window as unknown as { aw: unknown }).aw = bridge();
     render(<Picker state={{ ...state, storageWarning: "Could not save your session" }} />);
     expect(screen.getByTestId("storage-warning").textContent).toContain("Could not save");
+  });
+});
+
+describe("Remove local workspace", () => {
+  const two = [ws({ name: "a", display_name: "Alpha" }), ws({ name: "b", display_name: "Beta", status: "running" })];
+
+  it("confirm names the workspace and says its data is deleted; Cancel removes nothing", async () => {
+    const b = bridge({ workspaces: two });
+    render(<Picker state={state} />);
+    fireEvent.click(await screen.findByTestId("remove-a"));
+    const modal = await screen.findByTestId("remove-modal");
+    expect(modal.textContent).toContain("Alpha");
+    expect(modal.textContent).toMatch(/deletes the workspace/);
+    expect(modal.textContent).toMatch(/all of its data/);
+    expect(modal.textContent).not.toMatch(/sandbox/i);
+    fireEvent.click(screen.getByTestId("remove-cancel"));
+    expect(screen.queryByTestId("remove-modal")).toBeNull();
+    expect(b.removeLocalWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("confirming calls the bridge with the id, disables while busy, then the badge drops 2/2 -> 1/2 without restart", async () => {
+    let release!: (r: ApiResult<null>) => void;
+    let list = two;
+    const b = bridge({
+      workspaces: two,
+      removeLocalWorkspace: vi.fn(() => new Promise<ApiResult<null>>((r) => (release = r))),
+    });
+    b.listWorkspaces.mockImplementation(async () => ({
+      ok: true,
+      data: { workspaces: list, account: { limits: { max_local_workspaces: 2 }, local_count: list.length } },
+    }));
+    render(<Picker state={state} />);
+    expect((await screen.findByTestId("local-badge")).textContent).toBe("2/2");
+    fireEvent.click(screen.getByTestId("remove-a"));
+    fireEvent.click(await screen.findByTestId("remove-confirm"));
+    expect(b.removeLocalWorkspace).toHaveBeenCalledWith("a");
+    expect((screen.getByTestId("remove-confirm") as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByTestId("remove-cancel") as HTMLButtonElement).disabled).toBe(true);
+    list = [two[1]!];
+    release({ ok: true, data: null });
+    await waitFor(() => expect(screen.queryByTestId("remove-modal")).toBeNull());
+    await waitFor(() => expect(screen.getByTestId("local-badge").textContent).toBe("1/2"));
+    expect(screen.queryByTestId("remove-a")).toBeNull();
+  });
+
+  it("a failure is shown with a Retry that tries again", async () => {
+    const fn = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, error: "podman busy" })
+      .mockResolvedValueOnce({ ok: true, data: null });
+    bridge({ workspaces: two, removeLocalWorkspace: fn });
+    render(<Picker state={state} />);
+    fireEvent.click(await screen.findByTestId("remove-a"));
+    fireEvent.click(await screen.findByTestId("remove-confirm"));
+    expect((await screen.findByTestId("remove-error")).textContent).toContain("podman busy");
+    const retry = screen.getByTestId("remove-confirm") as HTMLButtonElement;
+    expect(retry.textContent).toBe("Retry");
+    expect(retry.disabled).toBe(false);
+    fireEvent.click(retry);
+    await waitFor(() => expect(fn).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByTestId("remove-modal")).toBeNull());
+  });
+
+  it("a stopped (half-created / failed) workspace has Remove too, and the limit modal leads to it", async () => {
+    bridge({ workspaces: two });
+    render(<Picker state={state} />);
+    const local = await screen.findByTestId("local-block");
+    expect(screen.getByTestId("pending-a").querySelector("[data-remove]")).not.toBeNull();
+    fireEvent.click(local.querySelector(":scope > button")!);
+    await screen.findByText("You've hit your free-tier limit");
+    fireEvent.click(screen.getByTestId("limit-remove"));
+    expect(screen.queryByText("You've hit your free-tier limit")).toBeNull();
+    expect(document.activeElement?.getAttribute("data-testid")).toBe("remove-a");
   });
 });

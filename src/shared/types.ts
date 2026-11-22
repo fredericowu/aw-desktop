@@ -110,6 +110,8 @@ export interface AwBridge {
   createLocalWorkspace(name: string): Promise<ApiResult<WorkspaceInfo>>;
   /** Start (or resume / retry) an existing local workspace and open it. Never creates one. */
   finishLocalSetup(slug: string): Promise<ApiResult<null>>;
+  /** Delete a local workspace and everything it owns (machine, containers, data, registry entry). */
+  removeLocalWorkspace(slug: string): Promise<ApiResult<null>>;
   getBootstrapProgress(): Promise<BootstrapProgress | null>;
   onBootstrapProgress(cb: (p: BootstrapProgress) => void): () => void;
   depsList(): Promise<DepsSnapshot>;

@@ -371,6 +371,27 @@ function registerIpcHandlers(): void {
     });
   });
 
+  // Remove a local workspace and all of its data. Same slot as setup, so it can never race a bootstrap.
+  ipcMain.handle("aw:removeLocalWorkspace", async (_e, id: string): Promise<ApiResult<null>> => {
+    if (!currentToken) return { ok: false, error: "session_lost" };
+    return scopedExclusive<ApiResult<null>>(setupSlot, sessionScope, BUSY, async () => {
+      const ws = local.registry.get(id);
+      if (!ws || ws.sub !== currentSub()) return { ok: false, error: "unknown_workspace" };
+      try {
+        if (shellLocalPort === ws.uiPort) {
+          shellWindow?.close();
+          shellWindow = null;
+          shellLocalPort = null;
+        }
+        await local.destroy(id);
+        if (bootstrapProgress?.slug === id) bootstrapProgress = null;
+        return { ok: true, data: null };
+      } catch (err) {
+        return apiFailure(err, "remove_failed");
+      }
+    });
+  });
+
   ipcMain.handle("aw:logout", () => logout());
 }
 
