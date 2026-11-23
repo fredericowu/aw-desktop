@@ -139,6 +139,27 @@ export class LocalWorkspaces {
     });
   }
 
+  /** User Retry from the in-window banner: a start (recovery mode after needs attention) that is part of the
+   * shutdown lifecycle. Resolves false without touching the runtime once quit has begun. Caller holds the setup slot. */
+  retry(id: string, authKey: () => Promise<string>): Promise<boolean> {
+    if (this.shuttingDown) return Promise.resolve(false);
+    const p = (async () => {
+      const key = await authKey();
+      if (this.shuttingDown || !this.registry.get(id)) return false;
+      await this.start(id, key, () => undefined);
+      return true;
+    })();
+    this.recovering = p;
+    return p.finally(() => {
+      if (this.recovering === p) this.recovering = null;
+    });
+  }
+
+  /** Supervisor status of a watched workspace (null when unwatched). */
+  supervisedStatus(id: string): SupervisedStatus | null {
+    return this.supervisor.status(id);
+  }
+
   /** Needs attention: still holds its ports, but the picker must offer Retry (a full start) instead of Open. */
   needsAttention(id: string): boolean {
     return this.supervisor.status(id) === "needs_attention";
