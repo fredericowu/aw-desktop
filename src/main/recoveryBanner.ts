@@ -4,13 +4,14 @@
 import { SUPERVISOR_COPY } from "../shared/errorCopy";
 import type { SupervisedStatus } from "./supervisorCore";
 
-export type BannerState = { kind: "hidden" } | { kind: "recovering"; text: string } | { kind: "attention"; text: string; canRetry: boolean };
+export type BannerState = { kind: "hidden" } | { kind: "recovering"; text: string } | { kind: "attention"; title: string; text: string; canRetry: boolean };
 
 export const BANNER_HIDDEN: BannerState = { kind: "hidden" };
 
 export const BANNER_COPY = {
   recovering: SUPERVISOR_COPY.starting,
-  attention: "This workspace needs attention.",
+  attentionTitle: "Needs attention",
+  attention: "We couldn't restart this workspace. Try again.",
   retry: "Retry",
   retrying: SUPERVISOR_COPY.starting,
 } as const;
@@ -18,7 +19,7 @@ export const BANNER_COPY = {
 /** Pure mapping from supervisor status. `running` and unwatched (null) dismiss the banner. */
 export function bannerFor(status: SupervisedStatus | null, retrying = false): BannerState {
   if (status === "starting" || retrying) return { kind: "recovering", text: BANNER_COPY.recovering };
-  if (status === "needs_attention") return { kind: "attention", text: BANNER_COPY.attention, canRetry: true };
+  if (status === "needs_attention") return { kind: "attention", title: BANNER_COPY.attentionTitle, text: BANNER_COPY.attention, canRetry: true };
   return BANNER_HIDDEN;
 }
 
@@ -89,6 +90,8 @@ const esc = (s: string): string => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeA
 export function bannerHtml(state: BannerState): string {
   if (state.kind === "hidden") return "<!doctype html><html><body></body></html>";
   const button = state.kind === "attention" && state.canRetry ? `<button id="r" onclick="window.awBanner.retry()">${esc(BANNER_COPY.retry)}</button>` : "";
+  const spinner = state.kind === "recovering" ? `<span class="spin" role="progressbar" aria-label="${esc(state.text)}"></span>` : "";
+  const heading = state.kind === "attention" ? `<b>${esc(state.title)}</b> ` : "";
   const bg = state.kind === "attention" ? "#7a2e0e" : "#1f3a5f";
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"><style>html,body{margin:0;height:100%;font:13px -apple-system,system-ui,sans-serif;color:#fff;background:${bg}}body{display:flex;align-items:center;justify-content:center;gap:12px}button{font:inherit;padding:3px 12px;border-radius:6px;border:1px solid #fff;background:transparent;color:#fff;cursor:pointer}</style></head><body><span role="status">${esc(state.text)}</span>${button}</body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"><style>html,body{margin:0;height:100%;font:13px -apple-system,system-ui,sans-serif;color:#fff;background:${bg}}body{display:flex;align-items:center;justify-content:center;gap:12px}.spin{width:14px;height:14px;border:2px solid rgba(255,255,255,.35);border-top-color:#fff;border-radius:50%;animation:s 0.9s linear infinite}@keyframes s{to{transform:rotate(360deg)}}b{font-weight:600}button{font:inherit;padding:3px 12px;border-radius:6px;border:1px solid #fff;background:transparent;color:#fff;cursor:pointer}</style></head><body>${spinner}<span role="status">${heading}${esc(state.text)}</span>${button}</body></html>`;
 }

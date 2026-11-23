@@ -5,6 +5,7 @@ import { Supervisor, type RecoverOutcome, type SupervisedStatus } from "../src/m
 import { LocalRuntime, type FsOps, type RunResult, type RuntimeConfig } from "../src/main/localRuntime";
 import type { LocalWorkspace } from "../src/main/localRegistry";
 import { LocalWorkspaces, toWorkspaceInfo } from "../src/main/localWorkspaces";
+import { bannerFor, bannerHtml } from "../src/main/recoveryBanner";
 import { SUPERVISOR_COPY } from "../src/shared/errorCopy";
 
 
@@ -385,5 +386,10 @@ describe("Supervisor production defaults", () => {
     }
     expect(calls).toBe(3);
     expect(sup.status("w")).toBe("needs_attention");
+    // The banner a user sees after those 3 attempts: heading + plain body + Retry.
+    const html = bannerHtml(bannerFor(sup.status("w")));
+    expect(html).toContain("<b>Needs attention</b>");
+    expect(html).toContain("We couldn&#39;t restart this workspace. Try again.");
+    expect(html).toContain("Retry");
   });
 });

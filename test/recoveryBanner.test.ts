@@ -22,7 +22,7 @@ describe("bannerFor", () => {
     expect(bannerFor("running").kind).toBe("hidden");
     expect(bannerFor(null).kind).toBe("hidden");
     expect(bannerFor("starting")).toEqual({ kind: "recovering", text: BANNER_COPY.recovering });
-    expect(bannerFor("needs_attention")).toEqual({ kind: "attention", text: BANNER_COPY.attention, canRetry: true });
+    expect(bannerFor("needs_attention")).toEqual({ kind: "attention", title: "Needs attention", text: "We couldn't restart this workspace. Try again.", canRetry: true });
   });
 });
 
@@ -92,6 +92,19 @@ describe("banner copy", () => {
     expect(bannerHtml(bannerFor("starting"))).not.toContain("Retry");
     expect(bannerHtml(bannerFor("needs_attention"))).toContain("Retry");
     expect(bannerHtml({ kind: "hidden" })).not.toContain("role=\"status\"");
+  });
+  it("attention shows the Needs attention heading, the body and Retry", () => {
+    const html = bannerHtml(bannerFor("needs_attention"));
+    expect(html).toContain("<b>Needs attention</b>");
+    expect(html).toContain("We couldn&#39;t restart this workspace. Try again.");
+    expect(html).not.toContain("This workspace needs attention");
+    expect(html).not.toContain('role="progressbar"');
+  });
+  it("Starting workspace shows a progress indicator; attention does not", () => {
+    const html = bannerHtml(bannerFor("starting"));
+    expect(html).toContain('role="progressbar"');
+    expect(html).toContain("Starting workspace...");
+    expect(html).toContain("animation");
   });
   it("escapes text", () => {
     expect(bannerHtml({ kind: "recovering", text: "<b>x</b>" })).not.toContain("<b>x");
