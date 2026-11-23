@@ -391,7 +391,9 @@ const bannerProbe = (app) => app.evaluate(async ({ webContents }) => {
   if (!wc) return null;
   const text = await wc.executeJavaScript("document.body.innerText").catch(() => "");
   const buttons = await wc.executeJavaScript("[...document.querySelectorAll('button')].map(b=>b.innerText)").catch(() => []);
-  return { id: wc.id, text: String(text).replace(/\s+/g, " ").trim(), buttons };
+  const spinner = await wc.executeJavaScript("document.querySelectorAll('[role=progressbar]').length").catch(() => 0);
+  const heading = await wc.executeJavaScript("(document.querySelector('b')||{}).innerText||''").catch(() => "");
+  return { id: wc.id, text: String(text).replace(/\s+/g, " ").trim(), buttons, spinner, heading };
 }).catch(() => null);
 const bannerAttached = (app) => app.evaluate(({ BrowserWindow }) => { const w = BrowserWindow.getAllWindows().find((x) => x.webContents.getURL().startsWith("http://127.0.0.1")); return w ? w.contentView.children.length : -1; }).catch(() => -1);
 async function bannerShot(app, name) {
@@ -406,6 +408,14 @@ async function bannerShot(app, name) {
   return b;
 }
 const shellShot = async (app, name) => { const s = shell(app); if (s) await app.evaluate(async ({ BrowserWindow }, nm) => { const w = BrowserWindow.getAllWindows().find((x) => x.webContents.getURL().startsWith("http://127.0.0.1")); const img = await w.capturePage(); require("fs").writeFileSync(nm, img.toPNG()); }, `${SH}/${name}.png`).catch((e) => log("shell shot failed", String(e).slice(0, 80))); };
+const compShot = async (app, name) => { // real screen pixels of the shell window region: capturePage omits the banner WebContentsView
+  const b = await app.evaluate(({ BrowserWindow }) => { const w = BrowserWindow.getAllWindows().find((x) => x.webContents.getURL().startsWith("http://127.0.0.1")); if (!w) return null; w.show(); w.focus(); return w.getBounds(); }).catch(() => null);
+  if (!b) return log("composite shot: no shell window");
+  await sleep(400);
+  const out = `${SH}/${name}-composite.png`;
+  sh(`screencapture -x -R${b.x},${b.y},${b.width},${b.height} "${out}"`);
+  log("COMPOSITE", name, existsSync(out) ? `${sh(`stat -f %z "${out}"`)} bytes` : "FAILED");
+};
 const bannerClickRetry = (app) => app.evaluate(async ({ webContents }) => { const wc = webContents.getAllWebContents().find((c) => !c.isDestroyed() && c.getURL().startsWith("data:text/html")); if (!wc) return false; return wc.executeJavaScript("(()=>{const b=[...document.querySelectorAll('button')].find(x=>/retry/i.test(x.innerText)); if(!b) return false; b.click(); return true;})()"); });
 
 S.banner = async () => { // kill VM with the workspace window open: banner "Starting workspace..." then auto-dismiss
@@ -417,9 +427,9 @@ S.banner = async () => { // kill VM with the workspace window open: banner "Star
   killVm(ws.id); const tk = Date.now();
   const seen = []; let shotDone = false; let sawStarting = null;
   const ok = await waitFor(async () => { const b = await bannerProbe(app); const att = await bannerAttached(app); const line = `${att}:${b?.text ?? "-"}`; if (seen[seen.length - 1]?.l !== line) { seen.push({ l: line, t: T() }); log("banner", line); }
-    if (b && /Starting workspace\.\.\./.test(b.text) && att > base && !shotDone) { shotDone = true; sawStarting = b; await bannerShot(app, "41-banner-starting"); await shellShot(app, "41-shell-with-banner"); }
+    if (b && /Starting workspace\.\.\./.test(b.text) && att > base && !shotDone) { shotDone = true; sawStarting = b; await bannerShot(app, "41-banner-starting"); await shellShot(app, "41-shell-with-banner"); await compShot(app, "41-shell-with-banner"); }
     return shotDone; }, 120000, 250);
-  rec("VM-5 kill VM: in-window banner shows 'Starting workspace...' (attached view, captured via capturePage)", !!ok && !!sawStarting, JSON.stringify(sawStarting));
+  rec("VM-5 kill VM: in-window banner shows 'Starting workspace...' with a spinner (role=progressbar)", !!ok && !!sawStarting && sawStarting.spinner >= 1, JSON.stringify(sawStarting));
   const gone = await waitFor(async () => (await bannerAttached(app)) <= base && health(ws.apiPort) === "200", 240000, 1000);
   rec("VM-5 kill VM: banner auto-dismisses after recovery and health is 200", !!gone, `${((Date.now() - tk) / 1000).toFixed(0)}s; timeline ${seen.map((x) => x.t + " " + x.l).join(" ; ")}`);
   await shellShot(app, "42-shell-after-dismiss");
@@ -433,9 +443,10 @@ S.bannerattention = async () => { // 3 forced failures -> Needs attention + copy
   let b = null; let tShot = false;
   const reached = await waitFor(async () => { b = await bannerProbe(app); return b && /needs attention/i.test(b.text) && b.buttons.some((x) => /retry/i.test(x)); }, 420000, 500);
   const used = callsSince(n); writeFileSync(`${SH}/50-calls-attention.txt`, used);
-  b = await bannerShot(app, "51-banner-needs-attention"); await shellShot(app, "51-shell-with-banner");
+  b = await bannerShot(app, "51-banner-needs-attention"); await shellShot(app, "51-shell-with-banner"); await compShot(app, "51-shell-with-banner");
   const starts = (used.match(/machine start/g) || []).length;
   rec("VM-5 3 forced failures: banner shows 'Needs attention' with a Retry button", !!reached && /needs attention/i.test(b?.text ?? "") && (b?.buttons ?? []).some((x) => /^retry$/i.test(x)), `${((Date.now() - tk) / 1000).toFixed(0)}s ${JSON.stringify(b)}`);
+  rec("VM-5 banner heading is exactly 'Needs attention' and no spinner while in attention", b?.heading === "Needs attention" && b?.spinner === 0, JSON.stringify({ heading: b?.heading, spinner: b?.spinner }));
   rec("VM-5 banner copy contains \"We couldn't restart this workspace. Try again.\"", /We couldn't restart this workspace\. Try again\./.test(b?.text ?? ""), JSON.stringify(b?.text));
   rec("VM-5 exactly 3 automatic attempts before attention", starts === 3, `machine start calls=${starts}`);
   rec("VM-5 banner is plain copy, no raw text", !/RAWMARK|gvproxy|krunkit|API_KEY|SECRET123/.test(b?.text ?? ""));
@@ -444,8 +455,8 @@ S.bannerattention = async () => { // 3 forced failures -> Needs attention + copy
   const clicked = await bannerClickRetry(app);
   let prog = null;
   await waitFor(async () => { const x = await bannerProbe(app); if (x && /Starting workspace\.\.\./.test(x.text)) { prog = x; return true; } return false; }, 30000, 150);
-  if (prog) await bannerShot(app, "52-banner-retry-progress");
-  rec("VM-5 Retry click returns the banner to 'Starting workspace...' progress (Retry gone)", clicked === true && !!prog && !prog.buttons.some((x) => /retry/i.test(x)), JSON.stringify(prog));
+  if (prog) { await bannerShot(app, "52-banner-retry-progress"); await compShot(app, "52-shell-retry-progress"); }
+  rec("VM-5 Retry click returns the banner to 'Starting workspace...' progress (Retry gone)", clicked === true && !!prog && !prog.buttons.some((x) => /retry/i.test(x)) && prog.spinner >= 1, JSON.stringify(prog));
   setMode("pass");
   const done = await waitFor(async () => (await bannerAttached(app)) <= base && health(ws.apiPort) === "200", 360000, 1500);
   const u2 = callsSince(n2); writeFileSync(`${SH}/53-calls-retry.txt`, u2);
@@ -455,19 +466,38 @@ S.bannerattention = async () => { // 3 forced failures -> Needs attention + copy
   await app.close();
 };
 
+S.retryfail = async () => { // (d) 3 failures -> attention; Retry while the engine still fails -> what does the banner show?
+  const { app, p, ws } = await bringUp("vm5-a");
+  const base = await bannerAttached(app);
+  setMode("startfail"); killVm(ws.id); const n = callCount();
+  const reached = await waitFor(async () => { const b = await bannerProbe(app); return b && /needs attention/i.test(b.text) && b.buttons.some((x) => /retry/i.test(x)); }, 420000, 500);
+  rec("pre: banner reached Needs attention", !!reached);
+  await bannerShot(app, "70-attention-before-retry"); await compShot(app, "70-attention-before-retry");
+  const n2 = callCount(); const clicked = await bannerClickRetry(app); const tl = []; let last = "";
+  const end = Date.now() + 180000; let settled = 0;
+  while (Date.now() < end) { const b = await bannerProbe(app); const l = b ? `${b.heading ? b.heading + " | " : ""}${b.text} [btn=${b.buttons.join(",")}] [spin=${b.spinner}]` : `none(attached=${await bannerAttached(app)})`; if (l !== last) { tl.push(`${T()} ${l}`); log("retry-fail banner", l); last = l; if (/needs attention/i.test(l) && tl.length > 1) { await bannerShot(app, "71-attention-after-failed-retry"); await compShot(app, "71-attention-after-failed-retry"); } } if (/needs attention/i.test(l) && tl.length > 1) settled++; else settled = 0; if (settled > 20) break; await sleep(500); }
+  writeFileSync(`${SH}/71-retryfail-timeline.txt`, tl.join("\n")); writeFileSync(`${SH}/71-calls-retryfail.txt`, callsSince(n2));
+  rec("VM-5 failed Retry: clicked, went to progress and ended back on Needs attention with Retry", clicked === true && tl.some((x) => /Starting workspace\.\.\./.test(x)) && /needs attention/i.test(last) && /btn=Retry/.test(last), tl.join(" ; "));
+  setMode("pass");
+  const done = await waitFor(async () => { const b = await bannerProbe(app); if (b && b.buttons.some((x) => /retry/i.test(x))) { await bannerClickRetry(app); } return (await bannerAttached(app)) <= base && health(ws.apiPort) === "200"; }, 360000, 2000);
+  rec("cleanup: workspace recovers once the failure is lifted", !!done);
+  await app.close();
+};
+
 S.vm4 = async () => { // diagnostics.log forced to 0644, then a write must leave 0600; setup modal title shows the display name
   setMode("pass");
   const app = await launch(); const p = await login(app);
   writeFileSync(`${UD}/diagnostics.log`, "[pre-existing]\n\n"); sh(`chmod 644 ${UD}/diagnostics.log`);
   const before = sh(`stat -f %Lp ${UD}/diagnostics.log`);
   rec("pre: diagnostics.log is 0644", before === "644", before);
-  const DN = "VM4 Proof Display";
+  const DN = "VM53 Typed Name";
   await openWizard(p); await p.fill("#sandbox-name", DN);
   setMode("dns");
   await p.locator(".modal button.primary").click();
   const titles = new Set();
   await waitFor(async () => { const t = await p.locator(".modal strong").first().innerText({ timeout: 200 }).catch(() => ""); if (t) titles.add(t); return (await p.locator('[data-testid="bootstrap-error"]').count()) > 0; }, 120000, 100);
   const t = await snap(app, p, "60-vm4-modal");
+  titles.add("[failed-state-modal] " + (await p.locator('[data-testid="bootstrap-progress"]').innerText().catch(() => "")).replace(/\s+/g, " "));
   rec("VM-4 write triggered (failure logged) and diagnostics.log is now 0600", sh(`stat -f %Lp ${UD}/diagnostics.log`) === "600" && /code=download_failed/.test(diag()) && /pre-existing/.test(diag()), `mode ${sh(`stat -f %Lp ${UD}/diagnostics.log`)}`);
   writeFileSync(`${SH}/60-vm4-perms.txt`, `before=${before}\nafter=${sh(`stat -f %Lp ${UD}/diagnostics.log`)}\ntitles=${[...titles].join(" | ")}\n`);
   rec("VM-4 setup modal title shows the workspace display name", [...titles].some((x) => x.includes(DN)), [...titles].join(" | "));
