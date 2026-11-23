@@ -188,13 +188,14 @@ S.errors = async () => {
 };
 
 // ---------------------------------------------------------------- VM-5 supervisor
-async function bringUp(name) {
+async function bringUp(name, showPicker = false) {
   setMode("pass");
   const app = await launch(); const p = await login(app);
   const ws = wsOf(name);
   const sh0 = await startWs(app, p, ws.id);
   if (!sh0) throw new Error("workspace did not come up");
   await waitFor(async () => health(ws.apiPort) === "200", 120000);
+  if (showPicker) { await switchWorkspace(app); await sleep(2500); await p.bringToFront().catch(() => {}); }
   return { app, p, ws };
 }
 const killVm = (id) => { const pids = vmPids(id); sh(`kill -9 ${pids.join(" ")}`); log("killed VM pids", pids.join(",")); return pids; };
@@ -248,7 +249,7 @@ S.hung = async () => {
 };
 
 S.attention = async () => {
-  const { app, p, ws } = await bringUp("vm5-a");
+  const { app, p, ws } = await bringUp("vm5-a", true);
   const disk0 = diskInfo(ws.id); const n = callCount();
   setMode("startfail"); killVm(ws.id); const tk = Date.now();
   const tl = await watchRows(p, ws.id, 420000, (r) => r.k === "attention");
@@ -278,7 +279,7 @@ S.attention = async () => {
 };
 
 S.wake = async () => {
-  const { app, p, ws } = await bringUp("vm5-a");
+  const { app, p, ws } = await bringUp("vm5-a", true);
   const n = callCount(); killVm(ws.id); const tk = Date.now();
   await sleep(2500);
   // emulate the OS wake notification the app subscribes to (powerMonitor 'resume'); a real pmset sleep would drop the host link
@@ -292,7 +293,7 @@ S.wake = async () => {
 };
 
 S.quit = async () => { // quit during recovery leaves no VM
-  const { app, p, ws } = await bringUp("vm5-a");
+  const { app, p, ws } = await bringUp("vm5-a", true);
   setMode("slowstart"); killVm(ws.id);
   const st = await watchRows(p, ws.id, 120000, (r) => r.k === "starting");
   rec("pre: recovery in progress (row starting)", (await rowState(p, ws.id))?.k === "starting", st.join(";"));
@@ -308,7 +309,7 @@ S.quit = async () => { // quit during recovery leaves no VM
 };
 
 S.remove = async () => { // remove during recovery does not race
-  const { app, p, ws } = await bringUp("vm5-a");
+  const { app, p, ws } = await bringUp("vm5-a", true);
   setMode("slowstart"); killVm(ws.id);
   await watchRows(p, ws.id, 120000, (r) => r.k === "starting");
   await sleep(6000);
