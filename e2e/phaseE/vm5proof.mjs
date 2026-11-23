@@ -115,23 +115,23 @@ S.preflight = async () => {
   const longHome = `${R}/h-` + "x".repeat(60);
   mkdirSync(`${longHome}/Library`, { recursive: true });
   sh(`ln -sfn /Users/aw/Library/Keychains ${longHome}/Library/Keychains`);
-  app = await launch({ HOME: longHome }); p = await login(app);
+  app = await launch({ HOME: longHome }); p = await login(app).catch(async (e) => { sh(`rm -f ${UD}/safestorage-*`); throw e; });
   await openWizard(p);
   const b2 = await p.locator('[data-testid="preflight-blocked"]').innerText({ timeout: 10000 }).catch(() => "");
   await snap(app, p, "12-wizard-path-too-long");
   rec("VM-3 fail path_too_long: plain copy", b2 === "This Mac's account name is too long to run local workspaces.", JSON.stringify(b2));
-  await app.close();
+  await app.close(); sh(`rm -f ${UD}/safestorage-*`);
   // failing case 3: low_disk (HOME on a small volume)
   sh(`hdiutil detach /Volumes/vm5small -force >/dev/null 2>&1; rm -f ${R}/small.dmg*`);
   sh(`hdiutil create -size 3g -fs APFS -volname vm5small ${R}/small.dmg >/dev/null 2>&1 && hdiutil attach ${R}/small.dmg >/dev/null 2>&1`);
   mkdirSync("/Volumes/vm5small/Library", { recursive: true }); sh("ln -sfn /Users/aw/Library/Keychains /Volumes/vm5small/Library/Keychains");
   log("small volume:", sh("df -h /Volumes/vm5small | tail -1"));
-  app = await launch({ HOME: "/Volumes/vm5small" }); p = await login(app);
+  app = await launch({ HOME: "/Volumes/vm5small" }); p = await login(app).catch(async (e) => { sh(`rm -f ${UD}/safestorage-*`); throw e; });
   await openWizard(p);
   const b3 = await p.locator('[data-testid="preflight-blocked"]').innerText({ timeout: 10000 }).catch(() => "");
   await snap(app, p, "13-wizard-low-disk");
   rec("VM-3 fail low_disk: plain copy with GB to free", /^Not enough free disk space\. Free up \d+ GB and try again\.$/.test(b3), JSON.stringify(b3));
-  await app.close();
+  await app.close(); sh(`rm -f ${UD}/safestorage-*`);
   sh(`hdiutil detach /Volumes/vm5small -force >/dev/null 2>&1; rm -f ${R}/small.dmg*; rm -rf ${longHome}`);
   rec("VM-3 low_memory / virtualization_unavailable on this Mac", true, "NOT driven: this Mac has 24 GiB and kern.hv_support=1; covered by unit tests only");
 };
