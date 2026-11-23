@@ -1,4 +1,4 @@
-import { appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readSync, renameSync, statSync } from "node:fs";
+import { chmodSync, closeSync, fchmodSync, fstatSync, mkdirSync, openSync, readSync, renameSync, statSync, writeSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname } from "node:path";
 import { redact } from "../shared/bootstrapState";
@@ -33,19 +33,41 @@ function bound(s: string): string {
   return `${s.slice(0, half)}\n[... truncated ...]\n${s.slice(-half)}`;
 }
 
+function tryChmod(fn: () => void): void {
+  try {
+    fn();
+  } catch {
+    // Not supported (Windows) or not ours to change: never break the flow being logged.
+  }
+}
+
 export function appendDiagnostic(file: string, e: DiagnosticEntry, now: Date = new Date()): void {
   try {
-    mkdirSync(dirname(file), { recursive: true });
+    const dir = dirname(file);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // mkdir's mode only applies to a directory it creates; tighten a pre-existing one too (best effort).
+    tryChmod(() => chmodSync(dir, 0o700));
     // Blank lines delimit entries, so squash them inside a body.
     // Bound before redacting so regex work is linear in a small input, then again after.
     const body = bound(redactSecrets(bound(e.raw)).trimEnd()).replace(/\n{2,}/g, "\n");
     const text = `[${now.toISOString()}] ${e.context} code=${e.code} acct=${acctTag(e.account)}\n${body}\n\n`;
     try {
-      if (statSync(file).size + Buffer.byteLength(text) > MAX_LOG_BYTES) renameSync(file, `${file}.1`);
+      if (statSync(file).size + Buffer.byteLength(text) > MAX_LOG_BYTES) {
+        renameSync(file, `${file}.1`);
+        tryChmod(() => chmodSync(`${file}.1`, 0o600));
+      }
     } catch {
       // No file yet.
     }
-    appendFileSync(file, text, { mode: 0o600 });
+    // open()'s mode only applies when the file is created, so a pre-existing 0644 file would stay
+    // readable by other local users. Enforce 0600 on every write.
+    const fd = openSync(file, "a", 0o600);
+    try {
+      tryChmod(() => fchmodSync(fd, 0o600));
+      writeSync(fd, text);
+    } finally {
+      closeSync(fd);
+    }
   } catch {
     // Logging must never break the flow it describes.
   }

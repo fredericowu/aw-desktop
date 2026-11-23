@@ -151,6 +151,16 @@ describe("Picker landing", () => {
     expect(b.finishLocalSetup).toHaveBeenCalledWith("mine");
   });
 
+  it("progress title shows the workspace display name, not the internal id", async () => {
+    bridge({ workspaces: [ws({ name: "localf22360", display_name: "My box", status: "stopped" })] });
+    render(<Picker state={state} />);
+    await screen.findByTestId("local-block");
+    emitProgress({ slug: "localf22360", phase: "running", step: "image", done: [], lines: [] });
+    const modal = await screen.findByTestId("bootstrap-progress");
+    expect(modal.textContent).toContain("Setting up My box");
+    expect(modal.textContent).not.toContain("localf22360");
+  });
+
   it("bootstrap failure shows plain copy only, Copy details and Retry", async () => {
     const b = bridge({ copyDiagnostics: vi.fn(async () => true) });
     render(<Picker state={state} />);

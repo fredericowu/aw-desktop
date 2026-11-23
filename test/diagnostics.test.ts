@@ -1,6 +1,6 @@
-import { mkdtempSync, readFileSync, existsSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { MAX_ENTRY_BYTES, MAX_LOG_BYTES, appendDiagnostic, readDiagnosticTail } from "../src/main/diagnostics";
 
@@ -58,5 +58,45 @@ describe("diagnostics log", () => {
   it("tail is empty when there is no log and never throws", () => {
     expect(readDiagnosticTail("/nonexistent/dir/diagnostics.log", "a")).toBe("");
     expect(() => appendDiagnostic("/proc/nope/x.log", { context: "c", code: "d", raw: "e", account: "a" })).not.toThrow();
+  });
+
+  // POSIX modes only; Windows has no chmod semantics.
+  const posix = process.platform === "win32" ? it.skip : it;
+  const mode = (p: string) => statSync(p).mode & 0o777;
+
+  posix("a new log is created 0600", () => {
+    const f = tmp();
+    appendDiagnostic(f, { context: "c", code: "d", raw: "e", account: "a" });
+    expect(mode(f)).toBe(0o600);
+  });
+
+  posix("a pre-existing 0644 log is tightened to 0600 on write, content preserved", () => {
+    const f = tmp();
+    mkdirSync(dirname(f), { recursive: true });
+    writeFileSync(f, "[old] entry\n\n");
+    chmodSync(f, 0o644);
+    appendDiagnostic(f, { context: "c", code: "d", raw: "new-detail", account: "a" });
+    expect(mode(f)).toBe(0o600);
+    const s = readFileSync(f, "utf8");
+    expect(s).toContain("[old] entry");
+    expect(s).toContain("new-detail");
+  });
+
+  posix("a pre-existing 0755 parent dir is tightened to 0700", () => {
+    const f = tmp();
+    mkdirSync(dirname(f), { recursive: true });
+    chmodSync(dirname(f), 0o755);
+    appendDiagnostic(f, { context: "c", code: "d", raw: "e", account: "a" });
+    expect(mode(dirname(f))).toBe(0o700);
+  });
+
+  posix("a rotated .1 file from a 0644 log is also 0600", () => {
+    const f = tmp();
+    mkdirSync(dirname(f), { recursive: true });
+    writeFileSync(f, "x".repeat(MAX_LOG_BYTES - 10));
+    chmodSync(f, 0o644);
+    appendDiagnostic(f, { context: "c", code: "d", raw: "e", account: "a" });
+    expect(mode(`${f}.1`)).toBe(0o600);
+    expect(mode(f)).toBe(0o600);
   });
 });

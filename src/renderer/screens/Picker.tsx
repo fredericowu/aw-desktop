@@ -221,6 +221,7 @@ export function Picker({ state }: { state: AuthState }) {
       {progress && (
         <ProgressModal
           progress={progress}
+          label={(ready?.workspaces.find((w) => w.name === progress.slug)?.display_name) ?? progress.slug}
           onRetry={async () => {
             const r = await window.aw.finishLocalSetup(progress.slug);
             return r.ok ? null : (r.error ?? "Could not restart setup.");
@@ -339,10 +340,13 @@ function WorkspaceRow({
 
 function ProgressModal({
   progress,
+  label,
   onRetry,
   onClose,
 }: {
   progress: BootstrapProgress;
+  /** Workspace display name; the slug is an internal id and must not reach the UI. */
+  label: string;
   /** Resolves an error message when the retry was refused before any progress was emitted. */
   onRetry: () => Promise<string | null>;
   onClose: () => void;
@@ -353,7 +357,7 @@ function ProgressModal({
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true" data-testid="bootstrap-progress">
       <div className="card modal">
-        <strong>{failed ? "Setup failed" : progress.phase === "done" ? "Your workspace is ready" : `Setting up ${progress.slug}`}</strong>
+        <strong>{failed ? "Setup failed" : progress.phase === "done" ? "Your workspace is ready" : `Setting up ${label}`}</strong>
         {!failed && <span className="dim" data-testid="bootstrap-phase">{progress.step ? STEP_LABEL[progress.step] : PHASE_LABEL.preparing}</span>}
         {failed && (
           <>
