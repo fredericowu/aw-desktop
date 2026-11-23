@@ -474,6 +474,21 @@ S.vm4 = async () => { // diagnostics.log forced to 0644, then a write must leave
   await app.close();
 };
 
+S.vm4title = async () => { // start the (previously failed-create) workspace with a display name; the progress modal title must use it
+  setMode("pass");
+  const app = await launch(); const p = await login(app);
+  const DN = "VM4 Proof Display"; const ws = wsOf(DN);
+  rec("pre: workspace registered under its display name", !!ws, JSON.stringify(ws));
+  const titles = new Set(); let shotN = 0;
+  await p.evaluate((i) => window.aw.pickWorkspace(i), ws.id);
+  const up = await waitFor(async () => { const t = await p.locator('[data-testid="bootstrap-progress"] strong').first().innerText({ timeout: 200 }).catch(() => ""); if (t && !titles.has(t)) { titles.add(t); await snap(app, p, `61-vm4-title-${++shotN}`); } return shell(app); }, 600000, 150);
+  log("titles", [...titles].join(" | "));
+  writeFileSync(`${SH}/61-vm4-titles.txt`, [...titles].join("\n"));
+  rec("VM-4 setup modal title shows the workspace display name", [...titles].some((x) => x === `Setting up ${DN}`), [...titles].join(" | "));
+  rec("VM-4 setup modal title never shows the internal id", ![...titles].some((x) => x.includes(ws.id)));
+  await app.close();
+};
+
 const name = process.argv[2];
 if (!S[name]) { console.log("scenarios:", Object.keys(S).join(" ")); process.exit(2); }
 try { await S[name](); } catch (e) { console.error("FATAL", e); results.push(false); }
