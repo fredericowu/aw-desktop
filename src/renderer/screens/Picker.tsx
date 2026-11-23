@@ -34,6 +34,9 @@ export function Picker({ state }: { state: AuthState }) {
   const [progress, setProgress] = useState<BootstrapProgress | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [removal, setRemoval] = useState<Removal | null>(null);
+  // Name typed in Create, kept until the new row shows up in the list. slug is null while the create call is in flight
+  // (progress can start before it resolves), then the new workspace's id. Never rendered; only its name is.
+  const [created, setCreated] = useState<{ slug: string | null; name: string } | null>(null);
 
   // Re-sync with a bootstrap that is already running (e.g. window re-opened)
   // and follow its live progress.
@@ -221,7 +224,10 @@ export function Picker({ state }: { state: AuthState }) {
       {progress && (
         <ProgressModal
           progress={progress}
-          label={ready?.workspaces.find((w) => w.name === progress.slug)?.display_name ?? null}
+          label={
+            ready?.workspaces.find((w) => w.name === progress.slug)?.display_name ??
+            (created && (created.slug === null || created.slug === progress.slug) ? created.name : null)
+          }
           onRetry={async () => {
             const r = await window.aw.finishLocalSetup(progress.slug);
             return r.ok ? null : (r.error ?? "Could not restart setup.");
@@ -254,7 +260,10 @@ export function Picker({ state }: { state: AuthState }) {
         <CreateWizard
           onClose={() => setModal(null)}
           onLimit={(l) => setModal({ kind: "limit", limit: l ?? limit })}
-          onCreated={() => {
+          onCreating={(name) => setCreated({ slug: null, name })}
+          onCreateFailed={() => setCreated(null)}
+          onCreated={(w, name) => {
+            setCreated({ slug: w.name, name });
             setModal(null);
             void refresh();
           }}
@@ -358,6 +367,7 @@ function ProgressModal({
     <div className="modal-backdrop" role="dialog" aria-modal="true" data-testid="bootstrap-progress">
       <div className="card modal">
         <strong>{failed ? "Setup failed" : progress.phase === "done" ? "Your workspace is ready" : (label ? `Setting up ${label}` : "Setting up your workspace")}</strong>
+        {failed && label && <span className="dim" data-testid="bootstrap-name">{label}</span>}
         {!failed && <span className="dim" data-testid="bootstrap-phase">{progress.step ? STEP_LABEL[progress.step] : PHASE_LABEL.preparing}</span>}
         {failed && (
           <>
@@ -446,11 +456,15 @@ function LimitModal({ limit, onClose, onRemove }: { limit: number; onClose: () =
 function CreateWizard({
   onClose,
   onLimit,
+  onCreating,
+  onCreateFailed,
   onCreated,
 }: {
   onClose: () => void;
   onLimit: (limit?: number) => void;
-  onCreated: () => void;
+  onCreating: (name: string) => void;
+  onCreateFailed: () => void;
+  onCreated: (ws: WorkspaceInfo, name: string) => void;
 }) {
   const [blocked, setBlocked] = useState<string | null>(null);
   const [name, setName] = useState("");
@@ -474,9 +488,12 @@ function CreateWizard({
   async function create() {
     setBusy(true);
     setError(null);
-    const res: ApiResult<WorkspaceInfo> = await window.aw.createLocalWorkspace(name.trim());
+    const typed = name.trim();
+    onCreating(typed);
+    const res: ApiResult<WorkspaceInfo> = await window.aw.createLocalWorkspace(typed);
     setBusy(false);
-    if (res.ok) return onCreated();
+    if (res.ok && res.data) return onCreated(res.data, typed);
+    onCreateFailed();
     if (res.status === 402 && isPlanLimitCode(res.code)) return onLimit(res.limit);
     setError(res.error ?? "Could not create the workspace.");
   }

@@ -171,6 +171,66 @@ describe("Picker landing", () => {
     expect(modal.textContent).not.toContain("localf22360");
   });
 
+  it("Create carries the typed name into the setup title and failed state while the list does not have the row yet", async () => {
+    const b = bridge({
+      workspaces: [],
+      createLocalWorkspace: vi.fn(async (): Promise<ApiResult<WorkspaceInfo>> => ({ ok: true, data: ws({ name: "localabc123" }) })),
+    });
+    render(<Picker state={state} />);
+    const local = await screen.findByTestId("local-block");
+    fireEvent.click(local.querySelector(":scope > button")!);
+    await waitFor(() => expect(b.preflight).toHaveBeenCalled());
+    fireEvent.change(screen.getByPlaceholderText("my-workspace"), { target: { value: "  My Box " } });
+    fireEvent.click(screen.getByText("Create workspace"));
+    await waitFor(() => expect(b.createLocalWorkspace).toHaveBeenCalledWith("My Box"));
+    await waitFor(() => expect(screen.queryByText("Create a new workspace")).toBeNull());
+    emitProgress({ slug: "localabc123", phase: "running", step: "image", done: [], lines: [] });
+    let modal = await screen.findByTestId("bootstrap-progress");
+    expect(modal.textContent).toContain("Setting up My Box");
+    expect(modal.textContent).not.toContain("localabc123");
+    emitProgress({ slug: "localabc123", phase: "failed", step: "image", done: [], failedStep: "image", error: "boom", lines: [] });
+    modal = await screen.findByTestId("bootstrap-progress");
+    expect(screen.getByTestId("bootstrap-name").textContent).toBe("My Box");
+    expect(modal.textContent).toContain("Setup failed");
+    expect(modal.textContent).not.toContain("localabc123");
+  });
+
+  it("progress that starts before the create call resolves already carries the typed name", async () => {
+    let release!: (r: ApiResult<WorkspaceInfo>) => void;
+    const b = bridge({
+      createLocalWorkspace: vi.fn(() => new Promise<ApiResult<WorkspaceInfo>>((r) => (release = r))),
+    });
+    render(<Picker state={state} />);
+    const local = await screen.findByTestId("local-block");
+    fireEvent.click(local.querySelector(":scope > button")!);
+    await waitFor(() => expect(b.preflight).toHaveBeenCalled());
+    fireEvent.change(screen.getByPlaceholderText("my-workspace"), { target: { value: "Early" } });
+    fireEvent.click(screen.getByText("Create workspace"));
+    await screen.findByText("Creating…");
+    emitProgress({ slug: "localearly1", phase: "running", step: "image", done: [], lines: [] });
+    const modal = await screen.findByTestId("bootstrap-progress");
+    expect(modal.textContent).toContain("Setting up Early");
+    expect(modal.textContent).not.toContain("localearly1");
+    release({ ok: true, data: ws({ name: "localearly1" }) });
+  });
+
+  it("a typed name from a failed create is not reused for a later unrelated progress", async () => {
+    const b = bridge({
+      createLocalWorkspace: vi.fn(async () => ({ ok: false, status: 500, error: "nope" })),
+    });
+    render(<Picker state={state} />);
+    const local = await screen.findByTestId("local-block");
+    fireEvent.click(local.querySelector(":scope > button")!);
+    await waitFor(() => expect(b.preflight).toHaveBeenCalled());
+    fireEvent.change(screen.getByPlaceholderText("my-workspace"), { target: { value: "Ghost" } });
+    fireEvent.click(screen.getByText("Create workspace"));
+    await screen.findByText("nope");
+    emitProgress({ slug: "other", phase: "running", step: "image", done: [], lines: [] });
+    const modal = await screen.findByTestId("bootstrap-progress");
+    expect(modal.textContent).toContain("Setting up your workspace");
+    expect(modal.textContent).not.toContain("Ghost");
+  });
+
   it("bootstrap failure shows plain copy only, Copy details and Retry", async () => {
     const b = bridge({ copyDiagnostics: vi.fn(async () => true) });
     render(<Picker state={state} />);
