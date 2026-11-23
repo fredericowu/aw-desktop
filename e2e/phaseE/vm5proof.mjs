@@ -201,6 +201,15 @@ async function bringUp(name, showPicker = false) {
 const killVm = (id) => { const pids = vmPids(id); sh(`kill -9 ${pids.join(" ")}`); log("killed VM pids", pids.join(",")); return pids; };
 const noDestructive = (txt) => !/machine (rm|init)|\bvolume rm\b| rm -f aw-local\w+-postgres/.test(txt);
 
+S.mkws = async () => {
+  setMode("pass");
+  const app = await launch(); const p = await login(app);
+  await openWizard(p); await p.fill("#sandbox-name", "vm5-a"); await p.locator(".modal button.primary").click();
+  const up = await waitFor(async () => shell(app), 600000, 1500);
+  const ws = wsOf("vm5-a");
+  rec("mkws: fresh workspace vm5-a created and healthy", !!up && health(ws.apiPort) === "200", JSON.stringify(ws));
+  await app.close();
+};
 S.kill = async () => { // kill VM with window open -> recovers; disk preserved
   const { app, p, ws } = await bringUp("vm5-a");
   const disk0 = diskInfo(ws.id), pid0 = vmPids(ws.id); log("disk(inode size)", disk0, "vm pids", pid0);
@@ -300,8 +309,9 @@ S.quit = async () => { // quit during recovery leaves no VM
   await sleep(8000); // machine start is in flight (shim sleeps 45s, then real start)
   const pid = await mainPid(app); log("quitting app pid", pid, "during recovery");
   app.evaluate(({ app: a }) => a.quit()).catch(() => {});
-  const exited = await waitFor(async () => sh(`kill -0 ${pid} 2>&1 && echo alive || echo dead`) === "dead", 240000, 1000);
-  rec("VM-5 quit during recovery: app exits", !!exited);
+  const tq = Date.now();
+  const exited = await waitFor(async () => { const st = sh(`ps -o stat= -p ${pid} 2>/dev/null`); return st === "" || st.startsWith("Z"); }, 300000, 1000);
+  rec("VM-5 quit during recovery: app exits (waits for the in-flight recovery, then stops what it started)", !!exited, `${((Date.now() - tq) / 1000).toFixed(0)}s after quit`);
   await sleep(5000);
   const left = vmPids(ws.id); log("VM pids after quit:", left.join(",") || "none");
   rec("VM-5 quit during recovery leaves no VM (no krunkit/gvproxy for the workspace)", left.length === 0 && sh(`pgrep -f "gvproxy.*aw-${ws.id}" || true`) === "", machineList(ws.id));
