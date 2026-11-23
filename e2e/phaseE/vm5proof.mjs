@@ -65,6 +65,9 @@ async function startWs(app, p, id, ms = 240000) { // open existing ws via pickWo
   await p.evaluate((i) => window.aw.pickWorkspace(i), id);
   return waitFor(async () => shell(app), ms, 2000);
 }
+const switchWorkspace = (app) => app.evaluate(({ Menu }) => { const ws = Menu.getApplicationMenu().items.find((i) => i.label === "Workspace"); ws.submenu.items.find((i) => i.label.startsWith("Switch")).click(); });
+// With the shell window open the picker window is parked on its splash: record what a user would see there.
+const parkedText = async (p) => (await text(p)).replace(/\s+/g, " ").slice(0, 120);
 const gone = async (p) => !(await p.evaluate(() => 1).catch(() => 0));
 
 const S = {};
@@ -203,6 +206,10 @@ S.kill = async () => { // kill VM with window open -> recovers; disk preserved
   rec("pre: shell window open + health 200", !!shell(app) && health(ws.apiPort) === "200");
   await snap(app, shell(app), "30-shell-before-kill");
   const n = callCount(); killVm(ws.id); const tk = Date.now();
+  await sleep(1500);
+  log("picker while shell open (no switch):", await parkedText(p));
+  writeFileSync(`${SH}/30b-picker-parked-while-shell-open.txt`, await text(p));
+  await switchWorkspace(app); await sleep(1500); await p.bringToFront().catch(() => {});
   const tl = await watchRows(p, ws.id, 240000, (r) => r.k === "here" && Date.now() - tk > 8000);
   const sawStarting = tl.some((l) => /starting: .*Starting workspace\.\.\./.test(l));
   rec("VM-5 kill VM: picker row shows 'Starting workspace...'", sawStarting, tl.join(" ; "));
@@ -227,6 +234,7 @@ S.hung = async () => {
   log(pm(`kill --signal STOP ${ctr}`));
   const tk = Date.now();
   await sleep(2500);
+  await switchWorkspace(app); await sleep(1500);
   rec("pre: core hung (health not 200) while container reports running", health(ws.apiPort) !== "200" && /running/i.test(pm(`inspect ${ctr} --format '{{.State.Status}}'`)), `health=${health(ws.apiPort)} state=${pm(`inspect ${ctr} --format '{{.State.Status}}'`)}`);
   const tl = await watchRows(p, ws.id, 240000, (r) => r.k === "here" && Date.now() - tk > 20000);
   rec("VM-5 hung core: row shows 'Starting workspace...' during recovery", tl.some((l) => /Starting workspace\.\.\./.test(l)), tl.join(" ; "));
