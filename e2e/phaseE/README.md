@@ -54,6 +54,14 @@ and run `node drive.mjs <up|stop|destroy> <root> <id> <apiPort> <uiPort> <uiDir>
 - `safeStorage` encrypts the token; after relaunch the saved session is loaded and the picker appears.
 - No storage warning with a working Keychain.
 
+**No-default-Keychain launch/relaunch** (`npm run e2e:phaseE:nokeychain`; separate, needs no JWT and no podman)
+- Seeds a throwaway profile with the `safestorage-disabled` flag (and, in a second case, only a stale
+  `safestorage-attempt` marker) beside a dummy `session.bin`, then launches the installed app.
+- Launched with a throwaway `HOME` that has no Keychain, so any `safeStorage` call would block on the OS
+  dialog. Asserts: login screen reached without hanging, no picker (session not decrypted), the disabled flag persists across a relaunch, no attempt marker left behind, and a
+  stale attempt marker is converted into the flag. It simulates the app's recorded failure state; it
+  does not remove the real default Keychain from the Mac.
+
 **Step 6, local workspaces**
 - Creating `e2e-one` serves the UI on `127.0.0.1:9031`; `/api/health` is 200 through the front server.
 - Marketplace catalog loads (`/api/apps/-/catalog?refresh=true`, >0 apps).
