@@ -233,6 +233,7 @@ S.hung = async () => {
   const env = `HOME=/Users/aw/.awd/${ws.id}/home TMPDIR=/Users/aw/.awd/${ws.id}/tmp PATH=${ENG}/bin:/usr/bin:/bin CONTAINERS_MACHINE_PROVIDER=libkrun CONTAINERS_HELPER_BINARY_DIR=${ENG}/bin`;
   const pm = (a) => sh(`${env} ${ENG}/bin/podman.real --connection aw-${ws.id} ${a} 2>&1`);
   log(pm(`kill --signal STOP ${ctr}`));
+  log(pm(`exec ${ctr} sh -c 'for p in $(ls /proc | grep -E "^[0-9]+$"); do [ "$p" != 1 ] && [ "$p" != "$$" ] && kill -STOP $p 2>/dev/null; done; echo stopped'`));
   const tk = Date.now();
   await sleep(2500);
   await switchWorkspace(app); await sleep(1500);
