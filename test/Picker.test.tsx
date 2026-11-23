@@ -211,6 +211,9 @@ describe("Picker landing", () => {
     const modal = await screen.findByTestId("bootstrap-progress");
     expect(modal.textContent).toContain("Setting up Early");
     expect(modal.textContent).not.toContain("localearly1");
+    // The wizard backdrop would sit on top of the progress dialog; it must not be mounted.
+    expect(screen.queryByText("Creating…")).toBeNull();
+    expect(screen.queryByText("Create a new workspace")).toBeNull();
     release({ ok: true, data: ws({ name: "localearly1" }) });
   });
 

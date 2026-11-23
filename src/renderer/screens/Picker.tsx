@@ -256,7 +256,7 @@ export function Picker({ state }: { state: AuthState }) {
           onCancel={() => setRemoval(null)}
         />
       )}
-      {modal?.kind === "wizard" && (
+      {modal?.kind === "wizard" && !progress && (
         <CreateWizard
           onClose={() => setModal(null)}
           onLimit={(l) => setModal({ kind: "limit", limit: l ?? limit })}
