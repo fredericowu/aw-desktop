@@ -57,8 +57,8 @@ and run `node drive.mjs <up|stop|destroy> <root> <id> <apiPort> <uiPort> <uiDir>
 **No-default-Keychain launch/relaunch** (`npm run e2e:phaseE:nokeychain`; separate, needs no JWT and no podman)
 - Seeds a throwaway profile with the `safestorage-disabled` flag (and, in a second case, only a stale
   `safestorage-attempt` marker) beside a dummy `session.bin`, then launches the installed app.
-- Asserts: login screen reached without hanging, no picker (session not decrypted), Keychain item
-  state unchanged, the disabled flag persists across a relaunch, no attempt marker left behind, and a
+- Launched with a throwaway `HOME` that has no Keychain, so any `safeStorage` call would block on the OS
+  dialog. Asserts: login screen reached without hanging, no picker (session not decrypted), the disabled flag persists across a relaunch, no attempt marker left behind, and a
   stale attempt marker is converted into the flag. It simulates the app's recorded failure state; it
   does not remove the real default Keychain from the Mac.
 
