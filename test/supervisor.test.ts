@@ -313,6 +313,55 @@ describe("LocalWorkspaces supervision wiring", () => {
   });
 });
 
+describe("banner Retry joins the shutdown lifecycle", () => {
+  const rec: LocalWorkspace = { id: "localaaa", name: "Box", sub: "1", uiPort: 9031, apiPort: 9032, createdAt: "t", cloud: "none" };
+  const make = () => {
+    const w = new LocalWorkspaces(() => null, async () => undefined);
+    vi.spyOn(w.registry, "get").mockReturnValue(rec);
+    vi.spyOn(w.registry, "reconcilePorts").mockResolvedValue({ workspace: rec } as never);
+    return w;
+  };
+
+  it("quit while Retry waits for the key: no runtime work starts", async () => {
+    const w = make();
+    const start = vi.spyOn(w.runtime, "start").mockResolvedValue();
+    let release!: (k: string) => void;
+    const key = new Promise<string>((r) => (release = r));
+    const retry = w.retry("localaaa", () => key);
+    const quit = w.stopAll(); // waits for the held Retry
+    release("k");
+    expect(await retry).toBe(false);
+    await quit;
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("quit during a Retry that is mid-start waits for it, then stops what it started", async () => {
+    const w = make();
+    const order: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    vi.spyOn(w.runtime, "start").mockImplementation(async () => (order.push("start"), await gate, order.push("started")));
+    vi.spyOn(w.runtime, "stop").mockImplementation(async () => void order.push("stop"));
+    (w as unknown as { running: Set<string> }).running.add("localaaa");
+    const retry = w.retry("localaaa", async () => "k");
+    await new Promise((r) => setTimeout(r, 0));
+    const quit = w.stopAll();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(order).toEqual(["start"]);
+    release();
+    await Promise.all([retry, quit]);
+    expect(order).toEqual(["start", "started", "stop"]);
+  });
+
+  it("Retry after quit began resolves false without calling the key provider", async () => {
+    const w = make();
+    await w.stopAll();
+    const key = vi.fn(async () => "k");
+    expect(await w.retry("localaaa", key)).toBe(false);
+    expect(key).not.toHaveBeenCalled();
+  });
+});
+
 // ---- production default pin (QA: 3 -> 4 still passed the targeted test) ----
 describe("Supervisor production defaults", () => {
   it("needs attention after EXACTLY 3 failed recovery attempts with no options passed", async () => {

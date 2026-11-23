@@ -174,11 +174,13 @@ function attachRecoveryBanner(win: BrowserWindow, localId: string | null): void 
 /** Banner Retry: a recovery-mode start inside the setup slot. Keeps the VM and its disk; never opens a second window. */
 async function retryRecovery(id: string): Promise<boolean> {
   if (!setupSlot.claim()) return false;
+  const initiator = shellWindow;
   try {
     if (!local.registry.get(id) || !currentToken) return false;
-    await local.start(id, await identityPublicKey(), () => undefined);
-    shellWindow?.webContents.reload();
-    return true;
+    const ok = await local.retry(id, async () => cachedIdentityPublicKey() ?? (await identityPublicKey()));
+    // Reload only the window that asked, and only if it is still the open one.
+    if (ok && initiator && shellWindow === initiator && !initiator.isDestroyed()) initiator.webContents.reload();
+    return ok;
   } catch (err) {
     void logFailure("banner_retry", err);
     return false;
