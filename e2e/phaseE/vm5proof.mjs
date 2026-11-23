@@ -39,7 +39,7 @@ const mainPid = (app) => app.evaluate(() => process.pid);
 export const launch = (extra = {}) => electron.launch({ executablePath: EXE, args: [`--user-data-dir=${UD}`], env: { ...process.env, AW_DESKTOP_ENGINE_DIR: ENG, ...extra } });
 const picker = async (app) => { for (let i = 0; i < 100; i++) { const w = app.windows().find((x) => !x.url().startsWith("http://127.0.0.1") && !x.url().startsWith("devtools")); if (w) return w; await sleep(300); } throw new Error("no picker"); };
 const shell = (app) => app.windows().find((w) => w.url().startsWith("http://127.0.0.1"));
-const text = (p) => p.evaluate(() => document.body.innerText).catch(() => "");
+const text = (p) => p.evaluate(() => document.body.innerText + "\n[modals] " + [...document.querySelectorAll(".modal, [role=dialog]")].map((e) => e.innerText).join(" || ")).catch(() => "");
 async function snap(app, p, name) {
   await app.evaluate(({ BrowserWindow }) => { for (const w of BrowserWindow.getAllWindows()) if (!w.webContents.getURL().startsWith("http://127.0.0.1")) { w.show(); w.focus(); } }).catch(() => {});
   await sleep(500);
@@ -113,7 +113,8 @@ S.preflight = async () => {
   await app.close();
   // failing case 2: path_too_long (long HOME)
   const longHome = `${R}/h-` + "x".repeat(60);
-  mkdirSync(longHome, { recursive: true });
+  mkdirSync(`${longHome}/Library`, { recursive: true });
+  sh(`ln -sfn /Users/aw/Library/Keychains ${longHome}/Library/Keychains`);
   app = await launch({ HOME: longHome }); p = await login(app);
   await openWizard(p);
   const b2 = await p.locator('[data-testid="preflight-blocked"]').innerText({ timeout: 10000 }).catch(() => "");
@@ -123,6 +124,7 @@ S.preflight = async () => {
   // failing case 3: low_disk (HOME on a small volume)
   sh(`hdiutil detach /Volumes/vm5small -force >/dev/null 2>&1; rm -f ${R}/small.dmg*`);
   sh(`hdiutil create -size 3g -fs APFS -volname vm5small ${R}/small.dmg >/dev/null 2>&1 && hdiutil attach ${R}/small.dmg >/dev/null 2>&1`);
+  mkdirSync("/Volumes/vm5small/Library", { recursive: true }); sh("ln -sfn /Users/aw/Library/Keychains /Volumes/vm5small/Library/Keychains");
   log("small volume:", sh("df -h /Volumes/vm5small | tail -1"));
   app = await launch({ HOME: "/Volumes/vm5small" }); p = await login(app);
   await openWizard(p);
@@ -130,7 +132,7 @@ S.preflight = async () => {
   await snap(app, p, "13-wizard-low-disk");
   rec("VM-3 fail low_disk: plain copy with GB to free", /^Not enough free disk space\. Free up \d+ GB and try again\.$/.test(b3), JSON.stringify(b3));
   await app.close();
-  sh(`hdiutil detach /Volumes/vm5small -force >/dev/null 2>&1; rm -f ${R}/small.dmg*; rmdir ${longHome} 2>/dev/null`);
+  sh(`hdiutil detach /Volumes/vm5small -force >/dev/null 2>&1; rm -f ${R}/small.dmg*; rm -rf ${longHome}`);
   rec("VM-3 low_memory / virtualization_unavailable on this Mac", true, "NOT driven: this Mac has 24 GiB and kern.hv_support=1; covered by unit tests only");
 };
 
