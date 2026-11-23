@@ -484,6 +484,17 @@ S.retryfail = async () => { // (d) 3 failures -> attention; Retry while the engi
   await app.close();
 };
 
+S.rmdisp = async () => { // free a slot under the 2-workspace cap: remove the earlier display-name workspace through the real Remove flow
+  setMode("pass");
+  const app = await launch(); const p = await login(app);
+  const ws = wsOf("VM4 Proof Display");
+  await p.locator(`[aria-label="Remove VM4 Proof Display"]`).click();
+  await p.locator('[data-testid="remove-confirm"]').click();
+  await p.locator('[data-testid="remove-modal"]').waitFor({ state: "detached", timeout: 180000 }).catch(() => {});
+  rec("slot freed: VM4 Proof Display removed", !wsOf("VM4 Proof Display") && vmPids(ws.id).length === 0);
+  await app.close();
+};
+
 S.vm4 = async () => { // diagnostics.log forced to 0644, then a write must leave 0600; setup modal title shows the display name
   setMode("pass");
   const app = await launch(); const p = await login(app);
