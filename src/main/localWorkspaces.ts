@@ -139,6 +139,11 @@ export class LocalWorkspaces {
     });
   }
 
+  /** Supervisor status of a watched workspace (null when unwatched). */
+  supervisedStatus(id: string): SupervisedStatus | null {
+    return this.supervisor.status(id);
+  }
+
   /** Needs attention: still holds its ports, but the picker must offer Retry (a full start) instead of Open. */
   needsAttention(id: string): boolean {
     return this.supervisor.status(id) === "needs_attention";

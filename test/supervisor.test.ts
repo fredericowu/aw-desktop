@@ -312,3 +312,29 @@ describe("LocalWorkspaces supervision wiring", () => {
     expect(start).not.toHaveBeenCalled();
   });
 });
+
+// ---- production default pin (QA: 3 -> 4 still passed the targeted test) ----
+describe("Supervisor production defaults", () => {
+  it("needs attention after EXACTLY 3 failed recovery attempts with no options passed", async () => {
+    let t = 1_000_000;
+    let calls = 0;
+    const statuses: SupervisedStatus[] = [];
+    const sup = new Supervisor({
+      healthy: async () => false,
+      recover: async () => {
+        calls++;
+        throw new Error("boom");
+      },
+      onStatus: (_id, s) => void statuses.push(s),
+      onFailure: () => undefined,
+      now: () => t,
+    });
+    sup.watch("w");
+    for (let i = 0; i < 20 && sup.status("w") !== "needs_attention"; i++) {
+      await sup.tick();
+      t += 10 * 60_000; // far past any backoff
+    }
+    expect(calls).toBe(3);
+    expect(sup.status("w")).toBe("needs_attention");
+  });
+});

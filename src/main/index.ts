@@ -14,6 +14,8 @@ import { classifyError, looksLikeEngineText, type ClassifiedError } from "./erro
 import { appendDiagnostic, readDiagnosticTail } from "./diagnostics";
 import { PodmanCommandError } from "./localRuntime";
 import { LocalWorkspaces, cachedIdentityPublicKey, identityPublicKey } from "./localWorkspaces";
+import { createBannerView } from "./bannerView";
+import { RecoveryBanner } from "./recoveryBanner";
 import { LocalLimitReachedError } from "./localRegistry";
 import { openIfCurrent, SessionScope, type SessionHandle, SetupSlot, scopedExclusive } from "./localBootstrap";
 import { advance, complete, fail, startProgress } from "../shared/bootstrapState";
@@ -31,6 +33,10 @@ const REFRESH_INTERVAL_MS = 30 * 60 * 1000;
 
 let authWindow: BrowserWindow | null = null;
 let shellWindow: BrowserWindow | null = null;
+/** Recovery banner inside the open local workspace window (null for cloud workspaces / no window). */
+let recoveryBanner: RecoveryBanner | null = null;
+let bannerDispose: (() => void) | null = null;
+let bannerContentsId: number | null = null;
 let currentToken: string | null = null;
 
 let bootstrapProgress: BootstrapProgress | null = null;
@@ -110,6 +116,7 @@ async function openWorkspace(slug: string, isCurrent: () => boolean = () => true
             ? createShellWindow(`http://127.0.0.1:${localWs.uiPort}/`, `http://127.0.0.1:${localWs.uiPort}`)
             : createShellWindow(workspaceUrl(slug));
           watchForSessionExpiry(shellWindow);
+          attachRecoveryBanner(shellWindow, localWs ? localWs.id : null);
         },
         // Signed out while the cookie was being written: don't leave it behind.
         () => (localWs ? clearLocalCookies() : void clearIdentityCookie().catch(() => undefined)),
@@ -134,8 +141,51 @@ function watchForSessionExpiry(win: BrowserWindow): void {
     }
   });
   win.on("closed", () => {
-    if (shellWindow === win) shellWindow = null;
+    if (shellWindow === win) {
+      shellWindow = null;
+      detachRecoveryBanner();
+    }
   });
+}
+
+function detachRecoveryBanner(): void {
+  recoveryBanner?.setOpen(null);
+  bannerDispose?.();
+  recoveryBanner = null;
+  bannerDispose = null;
+  bannerContentsId = null;
+}
+
+/** Local workspaces only: show supervisor recovery inside the workspace window (picker is hidden then). */
+function attachRecoveryBanner(win: BrowserWindow, localId: string | null): void {
+  detachRecoveryBanner();
+  if (!localId) return;
+  const view = createBannerView(win);
+  bannerDispose = view.dispose;
+  bannerContentsId = view.webContentsId();
+  recoveryBanner = new RecoveryBanner({
+    view,
+    statusOf: (id) => local.supervisedStatus(id),
+    retry: retryRecovery,
+  });
+  recoveryBanner.setOpen(localId);
+}
+
+/** Banner Retry: a recovery-mode start inside the setup slot. Keeps the VM and its disk; never opens a second window. */
+async function retryRecovery(id: string): Promise<boolean> {
+  if (!setupSlot.claim()) return false;
+  try {
+    if (!local.registry.get(id) || !currentToken) return false;
+    await local.start(id, await identityPublicKey(), () => undefined);
+    shellWindow?.webContents.reload();
+    return true;
+  } catch (err) {
+    void logFailure("banner_retry", err);
+    return false;
+  } finally {
+    if (local.registry.get(id)) liveAuthWindow()?.webContents.send("aw:workspace-status", local_row(id));
+    setupSlot.release();
+  }
 }
 
 async function bootstrap(): Promise<void> {
@@ -274,6 +324,7 @@ function startLocalSupervisor(): void {
       }
     },
     onStatus: (id) => {
+      recoveryBanner?.onStatus(id, local.supervisedStatus(id));
       if (local.registry.get(id)) liveAuthWindow()?.webContents.send("aw:workspace-status", local_row(id));
     },
     onFailure: (_id, err) => void logFailure("supervisor_recover", err),
@@ -289,6 +340,10 @@ function startLocalSupervisor(): void {
 
 function registerIpcHandlers(): void {
   ipcMain.handle("aw:getState", () => state);
+  ipcMain.on("aw:banner-retry", (e) => {
+    // Only the banner view itself may trigger it, never the hosted workspace page.
+    if (bannerContentsId !== null && bannerContentsId === e.sender.id) void recoveryBanner?.retry();
+  });
 
   ipcMain.handle("aw:login", async (_e, email: string, password: string) => {
     try {
