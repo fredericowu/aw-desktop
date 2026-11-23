@@ -7,11 +7,11 @@ import { execSync } from "node:child_process";
 import { join } from "node:path";
 
 const R = "/Users/aw/aw-e2e-vm5";
-const APP = `${R}/app/AW Desktop.app`;
+const APP = process.env.AW_E2E_APP || `${R}/app/AW Desktop.app`;
 const EXE = `${APP}/Contents/MacOS/AW Desktop`;
 const UD = `${R}/ud`;
 const ENG = `${R}/engine`;
-const SH = `${R}/shots/vm5`;
+const SH = process.env.AW_E2E_SHOTS || `${R}/shots/vm5`;
 const MODE = "/tmp/awvm5/mode";
 const CALLS = "/tmp/awvm5/calls.log";
 mkdirSync(SH, { recursive: true }); mkdirSync(UD, { recursive: true });
@@ -29,7 +29,7 @@ const callCount = () => calls().split("\n").length;
 const diag = () => (existsSync(`${UD}/diagnostics.log`) ? readFileSync(`${UD}/diagnostics.log`, "utf8") : "");
 const registry = () => { try { return JSON.parse(readFileSync(`${UD}/local-workspaces.json`, "utf8")).workspaces; } catch { return []; } };
 const wsOf = (name) => registry().find((w) => w.name === name);
-const jwt = () => readFileSync("/Users/aw/aw-e2e-vm2c/jwt.txt", "utf8").trim();
+const jwt = () => readFileSync(process.env.AW_E2E_JWT_FILE || "/Users/aw/aw-e2e-vm2c/jwt.txt", "utf8").trim();
 const vmPids = (id) => sh(`pgrep -f "krunkit.*aw-${id}" || true`).split("\n").filter(Boolean);
 const diskInfo = (id) => sh(`stat -f '%i %z' ~/.awd/${id}/home/.local/share/containers/podman/machine/libkrun/aw-${id}-arm64.raw`);
 const machineList = (id) => sh(`HOME=/Users/aw/.awd/${id}/home TMPDIR=/Users/aw/.awd/${id}/tmp PATH=${ENG}/bin:/usr/bin:/bin CONTAINERS_MACHINE_PROVIDER=libkrun CONTAINERS_HELPER_BINARY_DIR=${ENG}/bin ${ENG}/bin/podman.real machine list --format '{{.Name}} running={{.Running}}' 2>&1`);
@@ -380,6 +380,97 @@ S.removeok = async () => { // remove for real, supervisor must not resurrect
   rec("VM-5 remove: machine gone and nothing resurrected by the supervisor after 45s", !wsOf("vm5-a") && vmPids(ws.id).length === 0 && !/aw-/.test(machineList(ws.id)), machineList(ws.id) || "no machines");
   const after = callsSince(before); writeFileSync(`${SH}/39-calls-remove.txt`, after);
   rec("VM-5 remove: no machine init/start issued after the removal", !/machine (init|start)/.test(after.split("machine rm").slice(1).join("")));
+  await app.close();
+};
+
+// ---------------------------------------------------------------- banner (separate WebContentsView in the shell window)
+// The recovery banner is a WebContentsView (src/main/bannerView.ts): not a Playwright page and not in the shell DOM.
+// Find it by its data: URL through the main process, read its text and capture it with capturePage.
+const bannerProbe = (app) => app.evaluate(async ({ webContents }) => {
+  const wc = webContents.getAllWebContents().find((c) => !c.isDestroyed() && c.getURL().startsWith("data:text/html"));
+  if (!wc) return null;
+  const text = await wc.executeJavaScript("document.body.innerText").catch(() => "");
+  const buttons = await wc.executeJavaScript("[...document.querySelectorAll('button')].map(b=>b.innerText)").catch(() => []);
+  return { id: wc.id, text: String(text).replace(/\s+/g, " ").trim(), buttons };
+}).catch(() => null);
+const bannerAttached = (app) => app.evaluate(({ BrowserWindow }) => { const w = BrowserWindow.getAllWindows().find((x) => x.webContents.getURL().startsWith("http://127.0.0.1")); return w ? w.contentView.children.length : -1; }).catch(() => -1);
+async function bannerShot(app, name) {
+  const png = await app.evaluate(async ({ webContents }) => {
+    const wc = webContents.getAllWebContents().find((c) => !c.isDestroyed() && c.getURL().startsWith("data:text/html"));
+    if (!wc) return null; const img = await wc.capturePage(); return img.toPNG().toString("base64");
+  }).catch(() => null);
+  if (png) writeFileSync(`${SH}/${name}.png`, Buffer.from(png, "base64"));
+  const b = await bannerProbe(app);
+  writeFileSync(`${SH}/${name}.txt`, JSON.stringify(b));
+  log("BANNER", name, png ? "png ok" : "NO PNG", JSON.stringify(b));
+  return b;
+}
+const shellShot = async (app, name) => { const s = shell(app); if (s) await app.evaluate(async ({ BrowserWindow }, nm) => { const w = BrowserWindow.getAllWindows().find((x) => x.webContents.getURL().startsWith("http://127.0.0.1")); const img = await w.capturePage(); require("fs").writeFileSync(nm, img.toPNG()); }, `${SH}/${name}.png`).catch((e) => log("shell shot failed", String(e).slice(0, 80))); };
+const bannerClickRetry = (app) => app.evaluate(async ({ webContents }) => { const wc = webContents.getAllWebContents().find((c) => !c.isDestroyed() && c.getURL().startsWith("data:text/html")); if (!wc) return false; return wc.executeJavaScript("(()=>{const b=[...document.querySelectorAll('button')].find(x=>/retry/i.test(x.innerText)); if(!b) return false; b.click(); return true;})()"); });
+
+S.banner = async () => { // kill VM with the workspace window open: banner "Starting workspace..." then auto-dismiss
+  const { app, p, ws } = await bringUp("vm5-a");
+  await sleep(2000);
+  const base = await bannerAttached(app);
+  rec("pre: no banner while healthy", (await bannerProbe(app)) === null || base <= 1, `children=${base}`);
+  await shellShot(app, "40-shell-healthy");
+  killVm(ws.id); const tk = Date.now();
+  const seen = []; let shotDone = false; let sawStarting = null;
+  const ok = await waitFor(async () => { const b = await bannerProbe(app); const att = await bannerAttached(app); const line = `${att}:${b?.text ?? "-"}`; if (seen[seen.length - 1]?.l !== line) { seen.push({ l: line, t: T() }); log("banner", line); }
+    if (b && /Starting workspace\.\.\./.test(b.text) && att > base && !shotDone) { shotDone = true; sawStarting = b; await bannerShot(app, "41-banner-starting"); await shellShot(app, "41-shell-with-banner"); }
+    return shotDone; }, 120000, 250);
+  rec("VM-5 kill VM: in-window banner shows 'Starting workspace...' (attached view, captured via capturePage)", !!ok && !!sawStarting, JSON.stringify(sawStarting));
+  const gone = await waitFor(async () => (await bannerAttached(app)) <= base && health(ws.apiPort) === "200", 240000, 1000);
+  rec("VM-5 kill VM: banner auto-dismisses after recovery and health is 200", !!gone, `${((Date.now() - tk) / 1000).toFixed(0)}s; timeline ${seen.map((x) => x.t + " " + x.l).join(" ; ")}`);
+  await shellShot(app, "42-shell-after-dismiss");
+  await app.close();
+};
+
+S.bannerattention = async () => { // 3 forced failures -> Needs attention + copy + Retry; Retry returns to progress
+  const { app, p, ws } = await bringUp("vm5-a");
+  const base = await bannerAttached(app); const disk0 = diskInfo(ws.id);
+  setMode("startfail"); killVm(ws.id); const tk = Date.now(); const n = callCount();
+  let b = null; let tShot = false;
+  const reached = await waitFor(async () => { b = await bannerProbe(app); return b && /needs attention/i.test(b.text) && b.buttons.some((x) => /retry/i.test(x)); }, 420000, 500);
+  const used = callsSince(n); writeFileSync(`${SH}/50-calls-attention.txt`, used);
+  b = await bannerShot(app, "51-banner-needs-attention"); await shellShot(app, "51-shell-with-banner");
+  const starts = (used.match(/machine start/g) || []).length;
+  rec("VM-5 3 forced failures: banner shows 'Needs attention' with a Retry button", !!reached && /needs attention/i.test(b?.text ?? "") && (b?.buttons ?? []).some((x) => /^retry$/i.test(x)), `${((Date.now() - tk) / 1000).toFixed(0)}s ${JSON.stringify(b)}`);
+  rec("VM-5 banner copy contains \"We couldn't restart this workspace. Try again.\"", /We couldn't restart this workspace\. Try again\./.test(b?.text ?? ""), JSON.stringify(b?.text));
+  rec("VM-5 exactly 3 automatic attempts before attention", starts === 3, `machine start calls=${starts}`);
+  rec("VM-5 banner is plain copy, no raw text", !/RAWMARK|gvproxy|krunkit|API_KEY|SECRET123/.test(b?.text ?? ""));
+  // Retry -> progress. slowstart keeps the progress state observable.
+  setMode("slowstart"); const n2 = callCount();
+  const clicked = await bannerClickRetry(app);
+  let prog = null;
+  await waitFor(async () => { const x = await bannerProbe(app); if (x && /Starting workspace\.\.\./.test(x.text)) { prog = x; return true; } return false; }, 30000, 150);
+  if (prog) await bannerShot(app, "52-banner-retry-progress");
+  rec("VM-5 Retry click returns the banner to 'Starting workspace...' progress (Retry gone)", clicked === true && !!prog && !prog.buttons.some((x) => /retry/i.test(x)), JSON.stringify(prog));
+  setMode("pass");
+  const done = await waitFor(async () => (await bannerAttached(app)) <= base && health(ws.apiPort) === "200", 360000, 1500);
+  const u2 = callsSince(n2); writeFileSync(`${SH}/53-calls-retry.txt`, u2);
+  rec("VM-5 Retry recovers the workspace and the banner dismisses", !!done, `disk ${disk0} -> ${diskInfo(ws.id)}`);
+  rec("VM-5 Retry used machine start on the existing VM (no init/rm)", /machine start/.test(u2) && noDestructive(u2) && diskInfo(ws.id).split(" ")[0] === disk0.split(" ")[0]);
+  await shellShot(app, "54-shell-after-retry");
+  await app.close();
+};
+
+S.vm4 = async () => { // diagnostics.log forced to 0644, then a write must leave 0600; setup modal title shows the display name
+  setMode("pass");
+  const app = await launch(); const p = await login(app);
+  writeFileSync(`${UD}/diagnostics.log`, "[pre-existing]\n\n"); sh(`chmod 644 ${UD}/diagnostics.log`);
+  const before = sh(`stat -f %Lp ${UD}/diagnostics.log`);
+  rec("pre: diagnostics.log is 0644", before === "644", before);
+  const DN = "VM4 Proof Display";
+  await openWizard(p); await p.fill("#sandbox-name", DN);
+  setMode("dns");
+  await p.locator(".modal button.primary").click();
+  const titles = new Set();
+  await waitFor(async () => { const t = await p.locator(".modal strong").first().innerText({ timeout: 200 }).catch(() => ""); if (t) titles.add(t); return (await p.locator('[data-testid="bootstrap-error"]').count()) > 0; }, 120000, 100);
+  const t = await snap(app, p, "60-vm4-modal");
+  rec("VM-4 write triggered (failure logged) and diagnostics.log is now 0600", sh(`stat -f %Lp ${UD}/diagnostics.log`) === "600" && /code=download_failed/.test(diag()) && /pre-existing/.test(diag()), `mode ${sh(`stat -f %Lp ${UD}/diagnostics.log`)}`);
+  writeFileSync(`${SH}/60-vm4-perms.txt`, `before=${before}\nafter=${sh(`stat -f %Lp ${UD}/diagnostics.log`)}\ntitles=${[...titles].join(" | ")}\n`);
+  rec("VM-4 setup modal title shows the workspace display name", [...titles].some((x) => x.includes(DN)), [...titles].join(" | "));
   await app.close();
 };
 
