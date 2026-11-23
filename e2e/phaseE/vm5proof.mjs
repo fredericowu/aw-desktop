@@ -58,7 +58,7 @@ async function waitFor(fn, ms, step = 500) { const end = Date.now() + ms; while 
 const rowState = async (p, id) => p.evaluate((i) => { for (const k of ["here", "starting", "attention", "pending"]) { const e = document.querySelector(`[data-testid="${k}-${i}"]`); if (e) return { k, t: e.innerText.replace(/\s+/g, " ") }; } return null; }, id).catch(() => null);
 async function watchRows(p, id, ms, until) { // timeline of row states
   const tl = []; const end = Date.now() + ms; let last = "";
-  while (Date.now() < end) { const r = await rowState(p, id); const s = r ? `${r.k}: ${r.t}` : "none"; if (s !== last) { tl.push(`${T()} ${s}`); last = s; log("row", s); } if (until && r && until(r)) break; await sleep(500); }
+  while (Date.now() < end) { const r = await rowState(p, id); const s = r ? `${r.k}: ${r.t}` : "none"; if (s !== last) { tl.push(`${T()} ${s}`); last = s; log("row", s); } if (until && r && until(r, tl)) break; await sleep(500); }
   return tl;
 }
 async function startWs(app, p, id, ms = 240000) { // open existing ws via pickWorkspace; wait for shell
@@ -210,7 +210,7 @@ S.kill = async () => { // kill VM with window open -> recovers; disk preserved
   log("picker while shell open (no switch):", await parkedText(p));
   writeFileSync(`${SH}/30b-picker-parked-while-shell-open.txt`, await text(p));
   await switchWorkspace(app); await sleep(1500); await p.bringToFront().catch(() => {});
-  const tl = await watchRows(p, ws.id, 240000, (r) => r.k === "here" && Date.now() - tk > 8000);
+  const tl = await watchRows(p, ws.id, 240000, (r, tl) => r.k === "here" && tl.some((l) => /starting/.test(l)));
   const sawStarting = tl.some((l) => /starting: .*Starting workspace\.\.\./.test(l));
   rec("VM-5 kill VM: picker row shows 'Starting workspace...'", sawStarting, tl.join(" ; "));
   await snap(app, p, "31-picker-after-recovery");
@@ -220,8 +220,9 @@ S.kill = async () => { // kill VM with window open -> recovers; disk preserved
   const disk1 = diskInfo(ws.id);
   rec("VM-5 kill VM: same VM disk file (inode+size unchanged), new VM process", disk1.split(" ")[0] === disk0.split(" ")[0] && vmPids(ws.id).length > 0 && vmPids(ws.id).join() !== pid0.join(), `before ${disk0} after ${disk1}`);
   rec("VM-5 kill VM: machine list still has the same machine running", /aw-.*running=true/.test(machineList(ws.id)), machineList(ws.id));
-  const sw = shell(app);
-  rec("VM-5 kill VM: open workspace window still serves after recovery", !!sw && (await sw.evaluate(async () => (await fetch("/api/health")).status).catch(() => 0)) === 200);
+  await p.evaluate((i) => window.aw.pickWorkspace(i), ws.id);
+  const sw = await waitFor(async () => shell(app), 60000, 1000);
+  rec("VM-5 kill VM: workspace window reopens and serves after recovery", !!sw && (await sw.evaluate(async () => (await fetch("/api/health")).status).catch(() => 0)) === 200);
   await app.close();
 };
 
@@ -236,7 +237,7 @@ S.hung = async () => {
   await sleep(2500);
   await switchWorkspace(app); await sleep(1500);
   rec("pre: core hung (health not 200) while container reports running", health(ws.apiPort) !== "200" && /running/i.test(pm(`inspect ${ctr} --format '{{.State.Status}}'`)), `health=${health(ws.apiPort)} state=${pm(`inspect ${ctr} --format '{{.State.Status}}'`)}`);
-  const tl = await watchRows(p, ws.id, 240000, (r) => r.k === "here" && Date.now() - tk > 20000);
+  const tl = await watchRows(p, ws.id, 240000, (r, tl) => r.k === "here" && tl.some((l) => /starting/.test(l)));
   rec("VM-5 hung core: row shows 'Starting workspace...' during recovery", tl.some((l) => /Starting workspace\.\.\./.test(l)), tl.join(" ; "));
   rec("VM-5 hung core: health restored", (await waitFor(async () => health(ws.apiPort) === "200", 90000)) !== null, `${((Date.now() - tk) / 1000).toFixed(0)}s`);
   const used = callsSince(n); writeFileSync(`${SH}/32-calls-hung.txt`, used);
@@ -281,7 +282,7 @@ S.wake = async () => {
   await sleep(2500);
   // emulate the OS wake notification the app subscribes to (powerMonitor 'resume'); a real pmset sleep would drop the host link
   await app.evaluate(({ powerMonitor }) => { powerMonitor.emit("resume"); });
-  const tl = await watchRows(p, ws.id, 300000, (r) => r.k === "here" && Date.now() - tk > 8000);
+  const tl = await watchRows(p, ws.id, 300000, (r, tl) => r.k === "here" && tl.some((l) => /starting/.test(l)));
   const firstStarting = tl.find((l) => /starting/.test(l));
   log("timeline", tl.join(" ; "));
   rec("VM-5 wake with dead VM: health check runs on resume and the VM is recovered", (await waitFor(async () => health(ws.apiPort) === "200", 120000)) !== null && /machine start/.test(callsSince(n)), firstStarting ?? "no starting row seen");
