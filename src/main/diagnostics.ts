@@ -1,4 +1,4 @@
-import { chmodSync, closeSync, fchmodSync, fstatSync, mkdirSync, openSync, readSync, renameSync, statSync, writeSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, fchmodSync, fstatSync, mkdirSync, openSync, readSync, renameSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname } from "node:path";
 import { redact } from "../shared/bootstrapState";
@@ -64,7 +64,7 @@ export function appendDiagnostic(file: string, e: DiagnosticEntry, now: Date = n
     const fd = openSync(file, "a", 0o600);
     try {
       tryChmod(() => fchmodSync(fd, 0o600));
-      writeSync(fd, text);
+      appendFileSync(fd, text);
     } finally {
       closeSync(fd);
     }

@@ -161,6 +161,16 @@ describe("Picker landing", () => {
     expect(modal.textContent).not.toContain("localf22360");
   });
 
+  it("progress title never shows the internal id when the row is not in the list yet", async () => {
+    bridge({ workspaces: [] });
+    render(<Picker state={state} />);
+    await screen.findByTestId("local-block");
+    emitProgress({ slug: "localf22360", phase: "running", step: "image", done: [], lines: [] });
+    const modal = await screen.findByTestId("bootstrap-progress");
+    expect(modal.textContent).toContain("Setting up your workspace");
+    expect(modal.textContent).not.toContain("localf22360");
+  });
+
   it("bootstrap failure shows plain copy only, Copy details and Retry", async () => {
     const b = bridge({ copyDiagnostics: vi.fn(async () => true) });
     render(<Picker state={state} />);
