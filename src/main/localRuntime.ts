@@ -11,6 +11,7 @@
 //    needed (virtiofs bind mounts). Nothing here chowns.
 //  - core boots healthy with AW_BACKEND_URL / AW_WORKSPACE_HOST_TOKEN unset.
 import { execFile } from "node:child_process";
+import { darwinPlatform, type EnginePlatform } from "./enginePlatform";
 import { get as httpGet } from "node:http";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -106,18 +107,53 @@ export class PodmanCommandError extends Error {
   }
 }
 
-export const execRunner: Runner = (cmd, args, opts) =>
-  new Promise((resolve) => {
-    execFile(
-      cmd,
-      args,
-      { env: opts.env, timeout: opts.timeoutMs ?? 0, maxBuffer: 16 * 1024 * 1024 },
-      (err, stdout, stderr) => {
-        const code = err ? (typeof (err as { code?: unknown }).code === "number" ? ((err as { code: number }).code) : 1) : 0;
-        resolve({ code, stdout: String(stdout), stderr: err && !stderr ? String(err.message) : String(stderr) });
-      },
-    );
-  });
+type ExecFileFn = typeof execFile;
+const killTreeWin = (pid: number) => {
+  // execFile's own timeout kills podman.exe only; wsl.exe and the proxy helpers would survive it.
+  execFile("taskkill", ["/PID", String(pid), "/T", "/F"], () => undefined);
+};
+
+/** Runner for one platform. Darwin: plain execFile, timeout only when the caller gave one (unchanged).
+ * Windows: a default timeout, and on expiry the whole process tree is killed. */
+export function makeExecRunner(
+  platform: EnginePlatform = darwinPlatform,
+  exec: ExecFileFn = execFile,
+  killTree: (pid: number) => void = killTreeWin,
+): Runner {
+  return (cmd, args, opts) =>
+    new Promise((resolve) => {
+      const timeoutMs = opts.timeoutMs ?? platform.defaultTimeoutMs;
+      const own = platform.treeKill && timeoutMs > 0; // we own the timer so we can kill the tree
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const settle = (r: RunResult) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        resolve(r);
+      };
+      const child = exec(
+        cmd,
+        args,
+        { env: opts.env, timeout: own ? 0 : timeoutMs, maxBuffer: 16 * 1024 * 1024 },
+        (err, stdout, stderr) => {
+          const code = err ? (typeof (err as { code?: unknown }).code === "number" ? ((err as { code: number }).code) : 1) : 0;
+          settle({ code, stdout: String(stdout), stderr: err && !stderr ? String(err.message) : String(stderr) });
+        },
+      );
+      if (own) {
+        timer = setTimeout(() => {
+          // Settle AT the deadline: a helper holding the output pipe open can delay (or fake a success
+          // for) execFile's own callback, so the result must not wait for it. Cleanup runs independently.
+          settle({ code: 1, stdout: "", stderr: `timed out after ${Math.round(timeoutMs / 1000)}s` });
+          if (child.pid !== undefined) killTree(child.pid);
+          child.kill();
+        }, timeoutMs);
+      }
+    });
+}
+
+export const execRunner: Runner = makeExecRunner();
 
 export interface FsOps {
   mkdirp(p: string): void;
@@ -167,10 +203,12 @@ export interface RuntimeConfig {
   homesRoot: string;
   /** Workspace data root, e.g. ~/aw-workspaces. Must be under the real $HOME or shared into the VM. */
   dataRoot: string;
-  /** Short dir for TMPDIR (default /tmp). Per workspace: <tmpRoot>/aw-<id>. */
+  /** Short dir for TMPDIR (default: the platform's, /tmp on macOS). Per workspace: <tmpRoot>/aw-<id>. */
   tmpRoot?: string;
   /** PATH handed to podman (gvproxy/vfkit/krunkit live next to it). */
   path: string;
+  /** Platform seam; absent means macOS, the pre-seam behaviour. */
+  platform?: EnginePlatform;
   arch?: string;
   image?: string;
   workers?: number;
@@ -210,7 +248,7 @@ export function workspacePaths(cfg: RuntimeConfig, id: string): WorkspacePaths {
   const data = join(cfg.dataRoot, id);
   return {
     home: join(cfg.homesRoot, id, "home"),
-    tmp: join(cfg.tmpRoot ?? "/tmp", `aw-${id}`),
+    tmp: join(cfg.tmpRoot ?? (cfg.platform ?? darwinPlatform).tmpRoot(cfg.homesRoot), `aw-${id}`),
     data,
     workspace: join(data, "workspace"),
     homeData: join(data, "home"),
@@ -221,7 +259,7 @@ export function workspacePaths(cfg: RuntimeConfig, id: string): WorkspacePaths {
 }
 
 export function machineProvider(arch: string = process.arch): string {
-  return arch === "arm64" ? "libkrun" : "applehv";
+  return darwinPlatform.provider(arch);
 }
 
 /** The ONLY env podman ever sees: own HOME, short TMPDIR, provider, and the bundled helper dir.
@@ -230,17 +268,18 @@ export function machineProvider(arch: string = process.arch): string {
  * helper dirs first (Homebrew's), so a Mac with brew podman would boot the VM with unbundled helpers. */
 export function podmanEnv(cfg: RuntimeConfig, id: string): Record<string, string> {
   const p = workspacePaths(cfg, id);
-  return {
-    HOME: p.home,
-    TMPDIR: p.tmp,
-    PATH: cfg.path,
-    CONTAINERS_MACHINE_PROVIDER: machineProvider(cfg.arch),
-    CONTAINERS_HELPER_BINARY_DIR: dirname(cfg.podmanPath),
-  };
+  const plat = cfg.platform ?? darwinPlatform;
+  return plat.env({
+    home: p.home,
+    tmp: p.tmp,
+    path: cfg.path,
+    provider: plat.provider(cfg.arch ?? process.arch),
+    helperDir: dirname(cfg.podmanPath),
+  });
 }
 
 export function containersConf(cfg: RuntimeConfig): string {
-  return `[machine]\nprovider = "${machineProvider(cfg.arch)}"\n`;
+  return `[machine]\nprovider = "${(cfg.platform ?? darwinPlatform).provider(cfg.arch ?? process.arch)}"\n`;
 }
 
 // ---- pure argument builders (no connection prefix; LocalRuntime adds it) ----
@@ -250,12 +289,7 @@ export function machineInitArgs(cfg: RuntimeConfig, id: string): string[] {
   const p = workspacePaths(cfg, id);
   return [
     "machine", "init", machineName(id),
-    "--cpus", String(m.cpus ?? 2),
-    "--memory", String(m.memoryMiB ?? 4096),
-    "--disk-size", String(m.diskGiB ?? 40),
-    // HOME is the per-workspace one, so podman's default $HOME:$HOME share would
-    // not cover the data dir. Share it explicitly (virtiofs, same path in the VM).
-    "--volume", `${p.data}:${p.data}`,
+    ...(cfg.platform ?? darwinPlatform).machineInitFlags(p.data, m),
     "--now=false",
   ];
 }
@@ -360,7 +394,7 @@ export class LocalRuntime {
     private readonly cfg: RuntimeConfig,
     deps: RuntimeDeps = {},
   ) {
-    this.run = deps.run ?? execRunner;
+    this.run = deps.run ?? (cfg.platform ? makeExecRunner(cfg.platform) : execRunner);
     this.fs = deps.fs ?? realFs;
     this.status = deps.httpStatus ?? defaultStatus;
     this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
@@ -888,7 +922,7 @@ export class LocalRuntime {
     const dirs: Array<[string, string]> = [
       [p.data, this.cfg.dataRoot],
       [join(this.cfg.homesRoot, id), this.cfg.homesRoot],
-      [p.tmp, this.cfg.tmpRoot ?? "/tmp"],
+      [p.tmp, this.cfg.tmpRoot ?? (this.cfg.platform ?? darwinPlatform).tmpRoot(this.cfg.homesRoot)],
     ];
     for (const [dir, root] of dirs) {
       const rel = relative(root, dir);

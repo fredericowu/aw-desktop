@@ -8,6 +8,7 @@ import { API_BASE } from "./config";
 import { createFrontServer, type FrontServer } from "./frontServer";
 import { fileStore, LocalRegistry, registryPath, type LocalWorkspace } from "./localRegistry";
 import { LocalRuntime, upgradeAvailable, type RuntimeConfig } from "./localRuntime";
+import { platformFor, type EnginePlatform } from "./enginePlatform";
 import type { BootstrapStepId, WorkspaceInfo } from "../shared/types";
 import { LOCAL_PLACEMENT } from "../shared/workspaces";
 import { SUPERVISOR_COPY } from "../shared/errorCopy";
@@ -57,20 +58,22 @@ export function engineDir(): string {
   return process.env["AW_DESKTOP_ENGINE_DIR"] || join(process.resourcesPath ?? "", "engine");
 }
 
-export const podmanBinPath = (engine = engineDir()) => join(engine, "bin", "podman");
+export const podmanBinPath = (engine = engineDir(), platform: EnginePlatform = platformFor()) =>
+  join(engine, "bin", platform.exeName("podman"));
 
 /** macOS caps a unix socket path at 103 bytes. podman creates
  * <home>/.podman/aw-<id>-ignition.sock, so the per-workspace HOME must be short:
  * under ~/Library/Application Support/aw-desktop it was 117 bytes and
  * `podman machine start` died with "bind: invalid argument". */
-export function runtimeConfig(_userData: string, home = homedir(), engine = engineDir()): RuntimeConfig {
-  const bin = dirname(podmanBinPath(engine));
+export function runtimeConfig(_userData: string, home = homedir(), engine = engineDir(), platform: EnginePlatform = platformFor()): RuntimeConfig {
+  const bin = dirname(podmanBinPath(engine, platform));
   return {
-    podmanPath: podmanBinPath(engine),
+    podmanPath: podmanBinPath(engine, platform),
     homesRoot: join(home, ".awd"),
     dataRoot: join(home, "aw-workspaces"),
-    path: `${bin}:/usr/bin:/bin:/usr/sbin:/sbin`,
+    path: platform.path(bin),
     arch: process.arch,
+    platform,
   };
 }
 

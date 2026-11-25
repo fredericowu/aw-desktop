@@ -59,6 +59,10 @@ dmg:
   sign: true
 win:
   icon: build/icon.ico
+  # Container engine (scripts/fetch-engine.ps1): podman.exe, gvproxy.exe, win-sshproxy.exe in <resources>/engine/bin.
+  extraResources:
+    - from: resources/engine
+      to: engine
   target:
     - nsis
   artifactName: "${productName}-Setup-${version}.${ext}"

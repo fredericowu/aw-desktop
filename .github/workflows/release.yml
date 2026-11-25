@@ -174,6 +174,11 @@ jobs:
         shell: bash
         run: bash scripts/fetch-ui.sh
 
+      - name: Bundle container engine
+        # Pinned and sha256-verified in scripts/engine-ref; fails the job on any mismatch.
+        shell: pwsh
+        run: ./scripts/fetch-engine.ps1
+
       - name: Build
         run: npm run build
 

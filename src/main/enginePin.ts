@@ -4,3 +4,8 @@ export const PODMAN_VERSION = "6.0.2";
 export const PODMAN_PKG_SHA256: Record<string, string> = {
   arm64: "5a1d97f98f626cdb82dbd9932cf43102d1e9b6621627085fec2dcadf59743930",
 };
+/** Windows engine zip (podman.exe, win-sshproxy.exe) and the patched gvproxy-windowsgui.exe. Same pin file. */
+export const PODMAN_WINDOWS_ZIP_SHA256: Record<string, string> = {
+  x64: "2c055d363de03de917f79568a78b7d5902fc40453bbcc141ca18cf0a1fa1b78e",
+};
+export const GVPROXY_WINDOWS_SHA256 = "b121cd05f5f8beb82d93598a074715e7b686adddd7382080e49dd0bc39bf3aa2";
