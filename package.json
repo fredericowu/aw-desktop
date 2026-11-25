@@ -1,6 +1,6 @@
 {
   "name": "aw-desktop",
-  "version": "0.1.16",
+  "version": "0.1.17-vm5.4",
   "description": "Native macOS shell for aw-workspace — signed/notarized Electron thin client wrapping the hosted workspace UI.",
   "private": true,
   "main": "out/main/index.js",
