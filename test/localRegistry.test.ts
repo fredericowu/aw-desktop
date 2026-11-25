@@ -3,6 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { WORKSPACE_IMAGE } from "../src/main/localRuntime";
 import {
   LocalLimitReachedError,
   LocalRegistry,
@@ -58,7 +59,7 @@ describe("registry persistence", () => {
     const a = await mk(fileStore(path)).create("subA", "Home");
     const again = new LocalRegistry({ store: fileStore(path) }).list();
     expect(again).toEqual([a]);
-    expect(a).toMatchObject({ name: "Home", sub: "subA", uiPort: 9031, apiPort: 9032, cloud: "none" });
+    expect(a).toMatchObject({ name: "Home", sub: "subA", uiPort: 9031, apiPort: 9032, cloud: "none", image: WORKSPACE_IMAGE });
     expect(a.id).toMatch(/^local[a-z0-9]+$/);
   });
   it("second workspace gets different ports; remove frees the record", async () => {

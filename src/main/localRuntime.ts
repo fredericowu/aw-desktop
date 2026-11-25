@@ -19,6 +19,8 @@ import type { LocalWorkspace } from "./localRegistry";
 
 /** Pinned public tag (v0.165.0: ui_changed push + app_revs, required for live menu updates). Not `latest`: the bundled UI must match the core. */
 export const WORKSPACE_IMAGE = "ghcr.io/fredericowu/aw-workspace:v0.165.0";
+/** Image every workspace created before per-workspace pinning was seeded from. */
+export const LEGACY_WORKSPACE_IMAGE = "ghcr.io/fredericowu/aw-workspace:v0.158.0";
 // Same pinned digests as aw-remote-host bootstrap/{postgres,redis}/install.sh.
 export const POSTGRES_IMAGE =
   "docker.io/pgvector/pgvector@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb";
@@ -439,7 +441,7 @@ export class LocalRuntime {
   async start(ws: LocalWorkspace, opts: StartOptions = {}): Promise<void> {
     const id = ws.id;
     const step = opts.onStep ?? (() => undefined);
-    const image = this.cfg.image ?? WORKSPACE_IMAGE;
+    const image = this.cfg.image ?? ws.image ?? LEGACY_WORKSPACE_IMAGE;
     const paths = this.prepare(id);
     const names = containerNames(id);
 
