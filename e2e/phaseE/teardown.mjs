@@ -67,6 +67,14 @@ export async function adopt(name, timeoutMs = 60000) {
     await new Promise((r) => setTimeout(r, 500));
   }
 }
+/** Adopt a workspace that already exists in the registry (explicit opt-in: --teardown will then remove it). */
+export function adoptExisting(name) {
+  if (!baseline) throw new Error("teardown.snapshot() must run first");
+  const w = registry().workspaces.find((x) => x.name === name);
+  if (!w) throw new Error(`no registry entry named ${name} to reuse`);
+  adopted.add(w.id);
+  return w;
+}
 const owned = () => {
   if (!baseline) throw new Error("teardown.snapshot() must run before the run creates workspaces; refusing to guess what is safe to delete");
   return [...adopted];

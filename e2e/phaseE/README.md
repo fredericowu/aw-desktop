@@ -111,6 +111,43 @@ and run `node drive.mjs <up|stop|destroy> <root> <id> <apiPort> <uiPort> <uiDir>
 3. **Local Network settings panel stays on "Loading…" in standalone** (a
    local workspace has no host to answer it).
 
+## Recovery drivers (`recovery.mjs`): force quit, hung core, Needs attention + Retry, start failed
+
+`npm run e2e:phaseE:recovery` promotes the failure/recovery scratch drivers into the harness. Same
+prerequisites as above (GUI session, installed app, JWT file, no Accessibility permission). It is
+**destructive to its own workspace only**: it SIGKILLs that workspace's VM and the app, so it refuses to
+start without `AW_E2E_USER_DATA` (a throwaway dir; never the installed app's real profile).
+
+```bash
+AW_E2E_JWT_FILE=/path/jwt.txt AW_E2E_USER_DATA=/path/throwaway-ud npm run e2e:phaseE:recovery -- --dry-run   # validate config only
+AW_E2E_JWT_FILE=... AW_E2E_USER_DATA=... npm run e2e:phaseE:recovery -- --teardown                            # all scenarios, then clean up
+AW_E2E_JWT_FILE=... AW_E2E_USER_DATA=... npm run e2e:phaseE:recovery -- --reuse hung attention               # reuse an existing "e2e-recovery"
+```
+
+Extra env: `AW_E2E_WORK` (shim engine copy, mode and call log; default `./.tmp/phaseE-recovery`),
+`AW_E2E_ENGINE_SRC` (default `<app>/Contents/Resources/engine`), `AW_E2E_WS_NAME` (default `e2e-recovery`).
+Scenarios run in order in one process (`setup` first unless `--reuse`):
+
+| Scenario | Asserts |
+|---|---|
+| `setup` | seeds the session, creates the fixture workspace through the wizard, healthy |
+| `kill` | VM killed with the window open: row "Starting workspace...", same VM disk restarted (`machine start`, no init/rm), health back |
+| `hung` | every process in the core container frozen: container restarted, VM process unchanged |
+| `attention` | `machine start` failing: exactly 3 automatic attempts, row "Needs attention" + Retry, no 4th attempt, plain copy, diagnostics redacted; **Retry** recovers the same VM |
+| `forcequit` | app SIGKILLed with the VM up: relaunch stops the orphan and runs no VM until picked; then **start failed** modal shows plain copy only, Copy details has the raw text with the secret redacted, **Retry** brings it up |
+
+Failure injection: the app is launched with `AW_DESKTOP_ENGINE_DIR` pointing at a **copy** of its bundled
+engine whose `podman` is a bash shim (`shim.mjs`): it logs every call to `<work>/calls.log` and, per
+`<work>/mode`, fails one subcommand with a `RAWMARK-*` text (and a fake `API_KEY` secret) so the harness can
+prove raw output reaches `diagnostics.log`/clipboard but never the UI. The installed bundle is not modified.
+
+Safety: process lookups are scoped to the run's own workspace id (`krunkit.*aw-<id>`) and its own
+`--user-data-dir`; podman calls use the hermetic per-workspace env; the host-integrity tripwire
+(`podman-machine-default`, `:9030`) runs at start and end; saved text dumps redact token-shaped strings.
+Limits: arm64 (libkrun disk path), macOS only; `~/.awd`, `~/aw-workspaces` still derive from `$HOME`.
+`kill`/`hung`/`attention`/`forcequit` were promoted from scratch drivers that passed on the Mac; this
+committed version has been dry-run and unit-tested only, not yet executed on a device.
+
 ## Existing-workspace engine check (`driveExisting.ts`)
 
 Starts an already-registered local workspace with the real `LocalRuntime` and the engine bundled in

@@ -14,7 +14,8 @@
     "dist": "npm run build && electron-builder --mac --publish never",
     "test": "vitest run",
     "e2e:phaseE": "node e2e/phaseE/run.mjs",
-    "e2e:phaseE:nokeychain": "node e2e/phaseE/nokeychain.mjs"
+    "e2e:phaseE:nokeychain": "node e2e/phaseE/nokeychain.mjs",
+    "e2e:phaseE:recovery": "node e2e/phaseE/recovery.mjs"
   },
   "dependencies": {
     "electron-updater": "^6.3.9"
