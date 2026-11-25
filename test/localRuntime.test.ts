@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   LocalRuntime,
   PodmanCommandError,
+  LEGACY_WORKSPACE_IMAGE,
   WORKSPACE_IMAGE,
   machineInitArgs,
   machineProvider,
@@ -194,6 +195,15 @@ describe("start sequence", () => {
     await full.rt.start(mkWs("localaaa"));
     expect(full.calls.some((c) => c.args.includes("cp"))).toBe(false);
     expect(JSON.stringify(empty.calls)).not.toMatch(/chown|unshare/);
+  });
+  it("a workspace without a recorded image keeps the legacy image, a new one uses its own", async () => {
+    const legacy = harness();
+    await legacy.rt.start(mkWs("localaaa"));
+    const runImg = (h: typeof legacy) => h.calls.map((c) => c.args.join(" ")).filter((x) => x.includes("--name aw-localaaa-workspace")).map((x) => x.split(" ").pop());
+    expect(runImg(legacy)).toEqual([LEGACY_WORKSPACE_IMAGE]);
+    const fresh = harness();
+    await fresh.rt.start({ ...mkWs("localaaa"), image: WORKSPACE_IMAGE });
+    expect(runImg(fresh)).toEqual([WORKSPACE_IMAGE]);
   });
   it("recreates the core container when the published apiPort changed", async () => {
     const h = harness((args) => {

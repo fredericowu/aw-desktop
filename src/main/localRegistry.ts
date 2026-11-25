@@ -5,6 +5,7 @@ import { createServer } from "node:net";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { WORKSPACE_IMAGE } from "./localRuntime";
 
 export const FIRST_LOCAL_PORT = 9031;
 /** Port of the live/hosted workspace core on a machine; never ours. */
@@ -21,6 +22,8 @@ export interface LocalWorkspace {
   createdAt: string;
   /** "none" = standalone. A later tunnel/connect phase just points at apiPort. */
   cloud: "none";
+  /** Core image this workspace was created with; its bind-mounted source is seeded from it, so it never changes. Absent = created before v0.1.18 (LEGACY_WORKSPACE_IMAGE). */
+  image?: string;
 }
 
 export interface RegistryFile {
@@ -236,6 +239,7 @@ export class LocalRegistry {
         apiPort,
         createdAt: this.now().toISOString(),
         cloud: "none",
+        image: WORKSPACE_IMAGE,
       };
       this.save({ ...f, workspaces: [...f.workspaces, ws] });
       return ws;
