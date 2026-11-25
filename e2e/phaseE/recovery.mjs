@@ -51,11 +51,14 @@ const t0 = Date.now();
 const T = () => ((Date.now() - t0) / 1000).toFixed(1).padStart(6) + "s";
 const setMode = (m) => { writeFileSync(MODE_FILE, m); log("shim mode =", m); };
 const calls = () => (existsSync(CALLS) ? readFileSync(CALLS, "utf8") : "");
-const callCount = () => calls().split("\n").length;
+// The shim ends every entry with a newline, so the trailing empty element is not a call.
+const callCount = () => calls().split("\n").length - 1;
 const callsSince = (n) => calls().split("\n").slice(n).join("\n");
 const diag = () => (existsSync(join(UD, "diagnostics.log")) ? readFileSync(join(UD, "diagnostics.log"), "utf8") : "");
 const registry = () => { try { return JSON.parse(readFileSync(join(UD, "local-workspaces.json"), "utf8")).workspaces; } catch { return []; } };
-const wsOf = (name) => registry().find((w) => w.name === name);
+// The fixture is tracked by ID: display names are not unique, so a name lookup could hit an older workspace.
+let FIX = null;
+const wsById = (id) => registry().find((w) => w.id === id);
 const out = (cmd, args, env = toolEnv()) => { try { return execFileSync(cmd, args, { env, stdio: ["ignore", "pipe", "pipe"], timeout: 120000 }).toString().trim(); } catch (e) { return String(e.stdout ?? "").trim(); } };
 const vmPids = (id) => out("pgrep", ["-f", `krunkit.*aw-${id}`]).split("\n").filter(Boolean);
 const diskFile = (id) => join(HOMES, id, `home/.local/share/containers/podman/machine/libkrun/aw-${id}-arm64.raw`);
@@ -91,9 +94,10 @@ const noDestructive = (txt) => !/machine (rm|init)|\bvolume rm\b| rm -f aw-local
 async function bringUp(withPicker = false) {
   setMode("pass");
   const app = await launch(); const p = await loginPicker(app);
-  const ws = wsOf(NAME);
-  if (!(await startWs(app, p, ws.id))) throw new Error("workspace did not come up");
-  await waitFor(async () => (await health(ws.apiPort)) === "200", 120000);
+  if (!(await startWs(app, p, FIX.id))) throw new Error("workspace did not come up");
+  // Startup can reassign a busy API port and persist it: reload the record by id, then require THAT port healthy.
+  const ws = wsById(FIX.id);
+  if (!(await waitFor(async () => (await health(ws.apiPort)) === "200", 120000))) throw new Error(`workspace ${ws.id} not healthy on its current API port ${ws.apiPort}`);
   if (withPicker) { await switchWorkspace(app); await sleep(2500); await p.bringToFront().catch(() => {}); }
   return { app, p, ws };
 }
@@ -114,13 +118,14 @@ S.setup = async () => {
   }
   const app = await launch(); const p = await loginPicker(app);
   rec("setup: session loads, picker reached", true, "version " + (await app.evaluate(({ app: a }) => a.getVersion())));
-  if (FLAGS.has("--reuse")) { const w = adoptExisting(NAME); rec("setup: reusing existing workspace", true, w.id); await app.close(); return; }
+  if (FLAGS.has("--reuse")) { rec("setup: reusing existing workspace", true, FIX.id); await app.close(); return; }
   await p.getByRole("button", { name: /Create new (workspace|sandbox)/ }).first().click();
   await p.locator("#sandbox-name").waitFor();
   await p.fill("#sandbox-name", NAME);
   await p.locator(".modal button.primary").click();
-  const w = await adopt(NAME);
-  const up = await waitFor(async () => shellWindow(app, w.uiPort), 600000, 1500);
+  FIX = await adopt(NAME);
+  const up = await waitFor(async () => shellWindow(app, wsById(FIX.id).uiPort), 600000, 1500);
+  const w = wsById(FIX.id);
   rec("setup: fixture workspace created and healthy", !!up && (await health(w.apiPort)) === "200", `id ${w.id}`);
   await app.close();
   await waitFor(async () => vmPids(w.id).length === 0, 120000);
@@ -201,7 +206,8 @@ S.forcequit = async () => {
   await sleep(4000);
   // Orphaned Electron helpers of THIS harness's profile only (matched on its unique --user-data-dir), never the installed app's own.
   const esc = UD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  for (const hp of out("pgrep", ["-f", `--user-data-dir=${esc}`]).split("\n").filter(Boolean)) { try { process.kill(Number(hp), "SIGKILL"); } catch {} }
+  // `--` ends option parsing (BSD pgrep would read the pattern as a flag); the trailing ( |$) keeps a profile sharing this path prefix out.
+  for (const hp of out("pgrep", ["-f", "--", `--user-data-dir=${esc}( |$)`]).split("\n").filter(Boolean)) { try { process.kill(Number(hp), "SIGKILL"); } catch {} }
   await sleep(2000);
   rec("forcequit: force quit left the VM running (orphan)", vmPids(ws.id).length > 0, `krunkit ${vmPids(ws.id).join(",")}`);
   const app2 = await launch(); const p2 = await loginPicker(app2);
@@ -233,6 +239,8 @@ log("host state before (must be unchanged after the run):", JSON.stringify(hostB
 snapshot();
 let ok = false, fatal = null;
 try {
+  // Register the reuse target for teardown before any selected scenario runs (not only when setup is in the plan).
+  if (FLAGS.has("--reuse")) { FIX = adoptExisting(NAME); log("reusing workspace", FIX.id); }
   for (const name of PLAN) { log("=== scenario", name); await S[name](); }
   ok = true;
 } catch (e) { fatal = e; console.error(e); }
