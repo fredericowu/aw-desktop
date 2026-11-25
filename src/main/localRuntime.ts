@@ -124,22 +124,28 @@ export function makeExecRunner(
     new Promise((resolve) => {
       const timeoutMs = opts.timeoutMs ?? platform.defaultTimeoutMs;
       const own = platform.treeKill && timeoutMs > 0; // we own the timer so we can kill the tree
-      let timedOut = false;
+      let settled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
+      const settle = (r: RunResult) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        resolve(r);
+      };
       const child = exec(
         cmd,
         args,
         { env: opts.env, timeout: own ? 0 : timeoutMs, maxBuffer: 16 * 1024 * 1024 },
         (err, stdout, stderr) => {
-          if (timer) clearTimeout(timer);
           const code = err ? (typeof (err as { code?: unknown }).code === "number" ? ((err as { code: number }).code) : 1) : 0;
-          const fallback = timedOut ? `timed out after ${Math.round(timeoutMs / 1000)}s` : err ? String(err.message) : "";
-          resolve({ code, stdout: String(stdout), stderr: err && !stderr ? fallback : String(stderr) });
+          settle({ code, stdout: String(stdout), stderr: err && !stderr ? String(err.message) : String(stderr) });
         },
       );
       if (own) {
         timer = setTimeout(() => {
-          timedOut = true;
+          // Settle AT the deadline: a helper holding the output pipe open can delay (or fake a success
+          // for) execFile's own callback, so the result must not wait for it. Cleanup runs independently.
+          settle({ code: 1, stdout: "", stderr: `timed out after ${Math.round(timeoutMs / 1000)}s` });
           if (child.pid !== undefined) killTree(child.pid);
           child.kill();
         }, timeoutMs);

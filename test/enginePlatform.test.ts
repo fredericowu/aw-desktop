@@ -109,6 +109,14 @@ describe("makeExecRunner", () => {
     expect(h.killed).toEqual(["kill"]);
     expect(r.code).toBe(1);
   });
+  it("windows: settles at the deadline even when the child never calls back (helper holds the pipe)", async () => {
+    const exec = (() => ({ pid: 7, kill: () => true }) as unknown as ChildProcess) as never;
+    const tree: number[] = [];
+    const r = await makeExecRunner({ ...windowsPlatform, defaultTimeoutMs: 20 }, exec, (p) => tree.push(p))("wsl", [], { env: {} });
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("timed out");
+    expect(tree).toEqual([7]);
+  });
   it("windows: an explicit timeout wins over the default", async () => {
     const h = hung();
     const tree: number[] = [];
@@ -141,7 +149,7 @@ describe("windows engine packaging", () => {
   it("the fetch script verifies before unpacking and swaps in the pinned gvproxy", () => {
     const ps = read("scripts/fetch-engine.ps1");
     expect(ps.indexOf("Check $zip")).toBeLessThan(ps.indexOf("Expand-Archive"));
-    expect(ps).toContain("gvproxy-windows.exe");
+    expect(ps).toContain("gvproxy-windowsgui.exe");
     for (const b of ["podman.exe", "win-sshproxy.exe", "gvproxy.exe"]) expect(ps).toContain(b);
   });
   it("electron-builder bundles the engine on win, and the release job fetches it before packaging", () => {

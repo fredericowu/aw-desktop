@@ -33,7 +33,7 @@ try {
 
   $gv = Join-Path $work 'gvproxy.exe'
   if ($env:AW_ENGINE_GVPROXY) { Copy-Item $env:AW_ENGINE_GVPROXY $gv } else {
-    Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/containers/gvisor-tap-vsock/releases/download/$($ref['GVPROXY_VERSION'])/gvproxy-windows.exe" -OutFile $gv
+    Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/containers/gvisor-tap-vsock/releases/download/$($ref['GVPROXY_VERSION'])/gvproxy-windowsgui.exe" -OutFile $gv
   }
   Check $gv $ref['GVPROXY_WINDOWS_SHA256'] 'gvproxy'
 
