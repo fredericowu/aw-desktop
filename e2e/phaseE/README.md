@@ -47,6 +47,26 @@ server, no Electron): bundle it with
 `npx esbuild e2e/phaseE/drive.ts --bundle --platform=node --format=esm --outfile=<out>/drive.mjs`
 and run `node drive.mjs <up|stop|destroy> <root> <id> <apiPort> <uiPort> <uiDir> [pubkeyFile]`.
 
+## Upgrading an existing local workspace (v0.1.17-vm5.5+)
+
+An existing workspace stays on the core it was created with (v0.158.0, unpinned) until the user clicks
+**Upgrade workspace** on its picker row and confirms. In the app the row carries `data-testid="upgrade-<id>"`, the
+dialog `upgrade-modal`, the confirm button `upgrade-confirm`, and progress reuses `bootstrap-progress` with the
+title "Upgrading <name>". On a real Mac, runtime level, with the `drive.mjs` bundle above:
+
+```bash
+node drive.mjs up      <root> <id> <apiPort> <uiPort> <uiDir> <pubkey>   # legacy core, then stop it with SIGTERM
+# seed some state in the workspace (an installed app dir, a DB row) before upgrading
+node drive.mjs upgrade <root> <id> <apiPort> <uiPort> <uiDir> <pubkey>   # exit 0, prints UPGRADED / UPGRADE_COMMIT
+AW_E2E_UPGRADE_TARGET=ghcr.io/fredericowu/aw-workspace:v0.0.0-nope node drive.mjs upgrade ...   # exit 1, rolledBack=true, nothing changed
+AW_E2E_UPGRADE_HEALTH_MS=1000 node drive.mjs upgrade ...   # new core cannot be healthy in 1s: full post-swap rollback, exit 1, rolledBack=true
+```
+
+After a success assert: `<root>/aw-workspaces/<id>/workspace/apps` and `.aw-workspace/data` are byte-identical, the core
+answers on `apiPort` with the new image, no `upgrade.json` or `upgrade-*` dir is left in `<root>/aw-workspaces/<id>`,
+and the registry pin is the bundled image. After either failure assert the opposite: the old core answers, the
+seeded DB row and app dir are still there, and the same cleanliness holds.
+
 ## What each step asserts
 
 **Step 5, session and Keychain**

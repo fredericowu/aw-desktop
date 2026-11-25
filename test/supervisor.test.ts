@@ -184,7 +184,7 @@ const ok = (stdout = ""): RunResult => ({ code: 0, stdout, stderr: "" });
 function rtHarness(o: { machineRunning: boolean; engineUp: boolean; coreRunning: boolean; health: () => number }) {
   const cmds: string[] = [];
   const removed: string[] = [];
-  const fs: FsOps = { mkdirp() {}, writeFile() {}, readFile: () => "pw", isEmptyDir: () => false, rmrf: (p) => void removed.push(p) };
+  const fs: FsOps = { mkdirp() {}, writeFile() {}, readFile: () => "pw", isEmptyDir: () => false, rename() {}, listDir: () => [], exists: () => false, rmrf: (p) => void removed.push(p) };
   let t = 0;
   const rt = new LocalRuntime({ ...cfg, tmpRoot: "/tmp" }, {
     fs,

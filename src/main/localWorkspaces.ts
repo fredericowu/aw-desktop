@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { API_BASE } from "./config";
 import { createFrontServer, type FrontServer } from "./frontServer";
 import { fileStore, LocalRegistry, registryPath, type LocalWorkspace } from "./localRegistry";
-import { LocalRuntime, type RuntimeConfig } from "./localRuntime";
+import { LocalRuntime, upgradeAvailable, type RuntimeConfig } from "./localRuntime";
 import type { BootstrapStepId, WorkspaceInfo } from "../shared/types";
 import { LOCAL_PLACEMENT } from "../shared/workspaces";
 import { SUPERVISOR_COPY } from "../shared/errorCopy";
@@ -38,7 +38,13 @@ export function stepFor(runtimeStep: string): BootstrapStepId {
 
 /** The renderer-facing row for a registry record (`name` is the registry id, the slug `pickWorkspace` takes). */
 export function toWorkspaceInfo(ws: LocalWorkspace, running: boolean, supervised: SupervisedStatus | null = null): WorkspaceInfo {
-  const base = { name: ws.id, display_name: ws.name, placement_driver: LOCAL_PLACEMENT, is_hosted: false };
+  const base = {
+    name: ws.id,
+    display_name: ws.name,
+    placement_driver: LOCAL_PLACEMENT,
+    is_hosted: false,
+    ...(upgradeAvailable(ws) ? { upgrade_available: true } : {}),
+  };
   if (running && supervised === "starting") return { ...base, status: "starting", detail: SUPERVISOR_COPY.starting };
   if (running && supervised === "needs_attention") return { ...base, status: "needs_attention", detail: SUPERVISOR_COPY.needs_attention };
   return { ...base, status: running ? "running" : "stopped" };
@@ -217,6 +223,33 @@ export class LocalWorkspaces {
     this.running.add(id);
     this.supervisor.watch(id);
     return workspace;
+  }
+
+  /**
+   * Explicit, user-requested in-place upgrade of ONE workspace to the bundled core image. Caller holds the setup slot.
+   * The supervisor is unwatched for the duration (it must not "recover" a core we stopped on purpose) and is
+   * re-attached on every exit. On success the workspace is running the new core with its front server up; on failure
+   * the previous core is running again (see LocalRuntime.upgrade) and the registry pin is unchanged.
+   */
+  async upgrade(id: string, authPublicKey: string, onStep: (s: BootstrapStepId) => void): Promise<void> {
+    const ws = this.registry.get(id);
+    if (!ws) throw new Error(`unknown local workspace ${id}`);
+    if (this.shuttingDown) throw new Error("app is quitting");
+    const watched = this.supervisor.watching(id);
+    this.supervisor.unwatch(id);
+    try {
+      await this.runtime.upgrade(ws, {
+        authPublicKey,
+        onStep: (s) => onStep(stepFor(s)),
+        onCommit: (image) => this.registry.setImage(id, image),
+      });
+    } catch (err) {
+      if (watched && this.running.has(id)) this.supervisor.watch(id);
+      throw err;
+    }
+    // The core on the new image is up and its port is ours: a normal start brings the front server back and re-watches.
+    this.running.add(id);
+    await this.start(id, authPublicKey, () => undefined);
   }
 
   /** Remove one workspace completely: front server, containers, machine, dirs, then the registry entry.

@@ -34,3 +34,12 @@ export const SUPERVISOR_COPY = {
   starting: "Starting workspace...",
   needs_attention: "This workspace needs attention. Retry, or copy details for support.",
 } as const;
+
+/** Upgrade copy (same plain-language rule): never engine, image or container wording. */
+export const UPGRADE_COPY = {
+  title: "Upgrade workspace",
+  confirm: "This updates the workspace to the version bundled with this app. Your data and installed apps are kept. The workspace is unavailable for a few minutes, and if anything goes wrong it is restored to how it is now.",
+  progress: "Upgrading your workspace",
+  failedRestored: "The upgrade didn't complete. Your workspace was restored and works as before. Retry, or copy details for support.",
+  failedAttention: "The upgrade didn't complete and the workspace needs attention. Retry to finish restoring it, or copy details for support.",
+} as const;
