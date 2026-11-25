@@ -42,8 +42,8 @@ export const pinnedImage = (ws: Pick<LocalWorkspace, "image">): string => ws.ima
 /** True when the workspace runs a different core image than the bundled one. */
 export const upgradeAvailable = (ws: Pick<LocalWorkspace, "image">): boolean => pinnedImage(ws) !== WORKSPACE_IMAGE;
 
-type UpgradePhase = "staged" | "stopped" | "dumped" | "swapping" | "core_starting" | "committed";
-const PHASE_ORDER: UpgradePhase[] = ["staged", "stopped", "dumped", "swapping", "core_starting", "committed"];
+type UpgradePhase = "staged" | "stopped" | "dumped" | "swapping" | "core_starting" | "committed" | "rolled_back";
+const PHASE_ORDER: UpgradePhase[] = ["staged", "stopped", "dumped", "swapping", "core_starting", "committed", "rolled_back"];
 
 /** Persisted before the first destructive step, so a crash at any point can be undone (or finished) on the next start. */
 interface UpgradeJournal {
@@ -602,18 +602,24 @@ export class LocalRuntime {
   private journalPath(paths: WorkspacePaths): string {
     return join(paths.data, "upgrade.json");
   }
+  /** No journal = no upgrade in flight. A journal that exists but cannot be read is NOT "none": guessing could pair the old
+   * core with the new source, so it is surfaced and the workspace stays in needs-attention until it is resolved by hand. */
   private readJournal(paths: WorkspacePaths): UpgradeJournal | null {
     const raw = this.fs.readFile(this.journalPath(paths));
-    if (!raw) return null;
+    if (raw === null) return null;
     try {
       const j = JSON.parse(raw) as UpgradeJournal;
-      return j && j.v === 1 && PHASE_ORDER.includes(j.phase) ? j : null;
+      if (j && j.v === 1 && PHASE_ORDER.includes(j.phase)) return j;
     } catch {
-      return null;
+      // fall through
     }
+    throw new Error(`upgrade journal ${this.journalPath(paths)} is unreadable; refusing to guess the workspace state`);
   }
+  /** Write-then-rename: a crash leaves either the previous journal or the new one, never a truncated file. */
   private writeJournal(paths: WorkspacePaths, j: UpgradeJournal): void {
-    this.fs.writeFile(this.journalPath(paths), JSON.stringify(j));
+    const file = this.journalPath(paths);
+    this.fs.writeFile(`${file}.tmp`, JSON.stringify(j));
+    this.fs.rename(`${file}.tmp`, file);
   }
   private async pgExec(id: string, args: string[], timeoutMs?: number): Promise<RunResult> {
     return this.pm(id, ["exec", containerNames(id).postgres, ...args], timeoutMs);
@@ -638,6 +644,7 @@ export class LocalRuntime {
     const prev = `${names.workspace}-prev`;
     let journal: UpgradeJournal | null = null;
     let scratch: string | null = null;
+    let pinned = false;
     let password = "";
     try {
       step("machine");
@@ -693,14 +700,21 @@ export class LocalRuntime {
       journal = this.advanceJournal(paths, journal, "core_starting");
       await this.pm(id, workspaceRunArgs(input));
       step("health");
-      const url = `http://127.0.0.1:${ws.apiPort}/api/health`;
+      // strict=1: a core that answers 200 but reports a component down ("degraded") must not pass the commit gate.
+      const url = `http://127.0.0.1:${ws.apiPort}/api/health?strict=1`;
       await this.waitFor("workspace health", async () => (await this.status(url)) === 200, opts.healthTimeoutMs ?? 300_000);
 
-      // 5. Commit: persist the new pin first, then mark the journal, then discard the leftovers (best effort).
+      // 5. Commit: persist the new pin first. From here the upgrade is DONE: nothing below may roll it back
+      // (recovery resolves the boundary by the persisted pin), only best-effort bookkeeping remains.
       opts.onCommit?.(target);
-      journal = this.advanceJournal(paths, journal, "committed");
-      step("running");
-      await this.finishUpgradeCleanup(id, paths, journal);
+      pinned = true;
+      try {
+        journal = this.advanceJournal(paths, journal, "committed");
+        step("running");
+        await this.finishUpgradeCleanup(id, paths, journal);
+      } catch {
+        // journal/cleanup leftovers are resolved forward by the next start (pin === journal.to)
+      }
       return { upgraded: true };
     } catch (err) {
       if (!journal) {
@@ -708,6 +722,7 @@ export class LocalRuntime {
         if (scratch) this.fs.rmrf(scratch);
         throw new UpgradeFailedError(err, true);
       }
+      if (pinned) return { upgraded: true };
       let rolledBack = false;
       try {
         await this.rollbackUpgrade(ws, paths, password, journal);
@@ -729,8 +744,10 @@ export class LocalRuntime {
   async recoverUpgrade(ws: LocalWorkspace, paths: WorkspacePaths, password: string): Promise<void> {
     const j = this.readJournal(paths);
     if (!j) return;
-    if (j.phase === "committed") {
-      // The new pin was persisted (onCommit ran before this phase): only leftovers remain.
+    // The persisted pin is the commit point (it is saved before the journal says "committed"): a pin equal to the
+    // target means the new core was verified healthy, so resolve FORWARD even if the journal write never landed.
+    // "rolled_back" means the restore finished and only cleanup was interrupted: never replay the restore.
+    if (j.phase === "committed" || j.phase === "rolled_back" || pinnedImage(ws) === j.to) {
       await this.finishUpgradeCleanup(ws.id, paths, j);
       return;
     }
@@ -770,9 +787,12 @@ export class LocalRuntime {
     if (!hasMain && (await this.exists(id, ["container", "exists", prev]))) await this.pm(id, ["rename", prev, names.workspace]);
     const socketPath = await this.vmSocketPath(id);
     const input: WorkspaceRunInput = { ws, paths, password, socketPath, image: j.from, workers: this.cfg.workers ?? 2 };
-    await this.ensureContainer(id, names.workspace, workspaceRunArgs(input));
+    // Port-aware: recreates the old core when its published port is no longer the workspace's (reconciled) port.
+    await this.ensureWorkspaceContainer(id, input);
     const url = `http://127.0.0.1:${ws.apiPort}/api/health`;
     await this.waitFor("restored workspace health", async () => (await this.status(url)) === 200, 180_000);
+    // Terminal marker BEFORE the dump is deleted: a crash during cleanup must never replay the DB restore without it.
+    this.writeJournal(paths, { ...j, phase: "rolled_back" });
     await this.finishUpgradeCleanup(id, paths, j);
   }
 

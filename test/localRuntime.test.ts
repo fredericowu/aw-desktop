@@ -233,7 +233,7 @@ describe("start sequence", () => {
     const calls: string[][] = [];
     let t = 0;
     const rt = new LocalRuntime(cfg, {
-      fs: { mkdirp() {}, writeFile() {}, readFile: () => "pw", isEmptyDir: () => false, rename() {}, listDir: () => [], exists: () => false, rmrf() {} },
+      fs: { mkdirp() {}, writeFile() {}, readFile: (p: string) => (p.endsWith("upgrade.json") ? null : "pw"), isEmptyDir: () => false, rename() {}, listDir: () => [], exists: () => false, rmrf() {} },
       sleep: async () => void (t += 1000),
       now: () => t,
       httpStatus: async () => 0,

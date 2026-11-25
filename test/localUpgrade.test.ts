@@ -36,6 +36,8 @@ const fail = (stderr: string): RunResult => ({ code: 125, stdout: "", stderr });
 /** In-memory tree: path -> content (null = directory). rename/rmrf move/delete whole subtrees. */
 class MemFs implements FsOps {
   nodes = new Map<string, string | null>();
+  writes: string[] = [];
+  failWriteMatching: string | null = null;
   private kids(p: string) {
     return [...this.nodes.keys()].filter((k) => k !== p && k.startsWith(p + "/"));
   }
@@ -47,6 +49,8 @@ class MemFs implements FsOps {
     }
   }
   writeFile(p: string, d: string) {
+    this.writes.push(p);
+    if (this.failWriteMatching && d.includes(this.failWriteMatching)) throw new Error("EIO journal write");
     this.mkdirp(p.slice(0, p.lastIndexOf("/")));
     this.nodes.set(p, d);
   }
@@ -87,6 +91,7 @@ interface World {
   /** Per-test fault injection: return a result to override the fake engine for a command. */
   inject: { fn: (j: string) => RunResult | undefined };
   healthy: { fn: (image: string | null) => boolean };
+  strict: { fn: (image: string | null) => boolean };
   machineRunning: { value: boolean };
 }
 
@@ -107,6 +112,7 @@ function world(): World {
   const calls: string[] = [];
   const inject = { fn: (_j: string): RunResult | undefined => undefined };
   const healthy = { fn: (_img: string | null) => true };
+  const strict = { fn: (_img: string | null) => true };
   const machineRunning = { value: true };
   let t = 0;
   const rt = new LocalRuntime(cfg, {
@@ -114,8 +120,9 @@ function world(): World {
     sleep: async () => void (t += 1000),
     now: () => t,
     newSecret: () => "pw",
-    httpStatus: async () => {
+    httpStatus: async (url: string) => {
       const c = containers.get(names.workspace);
+      if (url.includes("strict=1") && c && !strict.fn(c.image)) return 503; // degraded core
       return c?.running && healthy.fn(c.image) ? 200 : 0;
     },
     run: async (_cmd, argv) => {
@@ -162,7 +169,7 @@ function world(): World {
     },
   });
   const committed: string[] = [];
-  return { rt, fs, calls, containers, db, committed, inject, healthy, machineRunning };
+  return { rt, fs, calls, containers, db, committed, inject, healthy, strict, machineRunning };
 }
 
 const upgrade = (w: World, extra: Partial<Parameters<LocalRuntime["upgrade"]>[1]> = {}) =>
@@ -345,5 +352,86 @@ describe("LocalRuntime.upgrade: failure leaves the old workspace working", () =>
     expect(w.containers.get(names.workspace)?.image).toBe(WORKSPACE_IMAGE);
     expect(w.calls.some((c) => c.includes("pg_restore"))).toBe(false);
     expect(w.fs.readFile(`${paths.workspace}/src/core.py`)).toBe("core v158"); // untouched: this fake never swapped it
+  });
+});
+
+describe("review fixes", () => {
+  it("a core that answers 200 but is degraded (strict health fails) is not committed", async () => {
+    const w = world();
+    w.strict.fn = (img) => img === LEGACY_WORKSPACE_IMAGE;
+    const err = await upgrade(w).catch((e) => e);
+    expect(err.rolledBack).toBe(true);
+    expect(w.committed).toEqual([]);
+    expect(w.containers.get(names.workspace)?.image).toBe(LEGACY_WORKSPACE_IMAGE);
+    expect(w.calls.some((c) => c.includes("/api/health"))).toBe(false); // health is probed over http, not podman
+  });
+
+  it("the journal is only ever written through a temp file and rename (never truncated in place)", async () => {
+    const w = world();
+    await upgrade(w);
+    const journalWrites = w.fs.writes.filter((p) => p.includes("upgrade.json"));
+    expect(journalWrites.length).toBeGreaterThan(3);
+    expect(journalWrites.every((p) => p.endsWith("upgrade.json.tmp"))).toBe(true);
+  });
+
+  it("an unreadable journal stops start() with a clear error instead of being treated as 'no upgrade'", async () => {
+    const w = world();
+    w.fs.writeFile(`${paths.data}/upgrade.json`, "");
+    await expect(w.rt.start(ws, { healthTimeoutMs: 5000 })).rejects.toThrow(/is unreadable/);
+    expect(w.calls.some((c) => c.startsWith("run -d"))).toBe(false);
+  });
+
+  it("pin saved but the 'committed' journal write fails: the upgrade stands (no rollback), and the next start resolves forward by the pin", async () => {
+    const w = world();
+    w.fs.failWriteMatching = '"phase":"committed"';
+    const r = await upgrade(w);
+    expect(r.upgraded).toBe(true);
+    expect(w.committed).toEqual([WORKSPACE_IMAGE]);
+    expect(w.containers.get(names.workspace)?.image).toBe(WORKSPACE_IMAGE);
+    expect(w.db.value).toBe("migrated forward");
+    expect(w.fs.readFile(`${paths.workspace}/src/core.py`)).toBe("core v165");
+    expect(w.calls.some((c) => c.includes("pg_restore"))).toBe(false);
+    // the journal is stale at core_starting, but the persisted pin is the new image
+    w.fs.failWriteMatching = null;
+    await w.rt.start({ ...ws, image: WORKSPACE_IMAGE }, { healthTimeoutMs: 5000 });
+    expect(w.calls.some((c) => c.includes("pg_restore") || c.includes("DROP DATABASE"))).toBe(false);
+    expect(w.containers.get(names.workspace)?.image).toBe(WORKSPACE_IMAGE);
+    expect(w.fs.exists(`${paths.data}/upgrade.json`)).toBe(false);
+  });
+
+  it("a rollback interrupted during cleanup (dump already deleted) is never replayed: it only finishes cleaning", async () => {
+    const w = world();
+    const root = `${paths.data}/upgrade-0`;
+    w.fs.writeFile(`${root}/backup/x`, "y");
+    // phase rolled_back, dump gone, DB already restored
+    w.fs.writeFile(`${paths.data}/upgrade.json`, JSON.stringify({ v: 1, from: LEGACY_WORKSPACE_IMAGE, to: WORKSPACE_IMAGE, phase: "rolled_back", root, dump: "gone.dump", replace: ["src"], add: [] }));
+    await w.rt.start(ws, { healthTimeoutMs: 5000 });
+    expect(w.calls.some((c) => c.includes("DROP DATABASE") || c.includes("pg_restore"))).toBe(false);
+    expect(w.db.value).toBe("pre-upgrade rows");
+    expect(w.fs.exists(root)).toBe(false);
+    expect(w.fs.exists(`${paths.data}/upgrade.json`)).toBe(false);
+    expect(w.containers.get(names.workspace)).toEqual({ image: LEGACY_WORKSPACE_IMAGE, running: true });
+  });
+
+  it("a completed rollback leaves the terminal marker BEFORE the dump is deleted", async () => {
+    const w = world();
+    w.healthy.fn = (img) => img === LEGACY_WORKSPACE_IMAGE;
+    await upgrade(w).catch(() => undefined);
+    const rolled = w.fs.writes.findIndex((p) => p.includes("upgrade.json"));
+    expect(rolled).toBeGreaterThanOrEqual(0);
+    const markerAt = w.calls.findIndex((c) => c.includes("rm -f /var/lib/postgresql/data/aw-upgrade"));
+    expect(markerAt).toBeGreaterThan(w.calls.findIndex((c) => c.includes("pg_restore")));
+  });
+
+  it("when the saved API port changed, the restored old core is recreated on the current port instead of its stale published one", async () => {
+    const w = world();
+    const moved = { ...ws, apiPort: 9040 }; // the old container still publishes 9032
+    w.healthy.fn = (img) => img === LEGACY_WORKSPACE_IMAGE;
+    const err = await w.rt.upgrade(moved, { healthTimeoutMs: 5000 }).catch((e) => e);
+    expect(err.rolledBack).toBe(true);
+    const run = [...w.calls].reverse().find((c) => c.startsWith(`run -d --pull=never --name ${names.workspace} `))!;
+    expect(run).toContain("127.0.0.1:9040:9030");
+    expect(run.endsWith(LEGACY_WORKSPACE_IMAGE)).toBe(true);
+    expect(w.containers.get(names.workspace)).toEqual({ image: LEGACY_WORKSPACE_IMAGE, running: true });
   });
 });

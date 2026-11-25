@@ -89,6 +89,8 @@ export class LocalWorkspaces {
   private hooks: SupervisorHooks | null = null;
   private shuttingDown = false;
   private recovering: Promise<unknown> | null = null;
+  /** Workspaces an upgrade has touched this session: its VM may be up without the workspace being in `running`. */
+  private readonly upgraded = new Set<string>();
 
   constructor(getToken: () => string | null, fetchMaxLocal: (token: string) => Promise<number | undefined>) {
     const userData = app.getPath("userData");
@@ -203,9 +205,8 @@ export class LocalWorkspaces {
     return this.registry.listFor(sub).map((w) => toWorkspaceInfo(w, this.running.has(w.id), this.supervisor.status(w.id)));
   }
 
-  /** Bring the machine, containers and front server up. Returns the (possibly port-bumped) record. */
-  async start(id: string, authPublicKey: string, onStep: (s: BootstrapStepId) => void): Promise<LocalWorkspace> {
-    const { workspace } = await this.registry.reconcilePorts(id, (p) => {
+  private reconcile(id: string) {
+    return this.registry.reconcilePorts(id, (p) => {
       // Our own front server (UI port) or running container (API port) is not a conflict.
       const cur = this.registry.get(id);
       if (!cur) return false;
@@ -213,6 +214,11 @@ export class LocalWorkspaces {
       if (p === cur.uiPort) return !!front && front.server.listening;
       return p === cur.apiPort && this.running.has(id);
     });
+  }
+
+  /** Bring the machine, containers and front server up. Returns the (possibly port-bumped) record. */
+  async start(id: string, authPublicKey: string, onStep: (s: BootstrapStepId) => void): Promise<LocalWorkspace> {
+    const { workspace } = await this.reconcile(id);
     // Retry after "needs attention": the core may still be running but hung, so use recovery rules.
     const recover = this.needsAttention(id);
     await this.runtime.start(workspace, { authPublicKey, recover, onStep: (s) => onStep(stepFor(s)) });
@@ -231,14 +237,25 @@ export class LocalWorkspaces {
    * re-attached on every exit. On success the workspace is running the new core with its front server up; on failure
    * the previous core is running again (see LocalRuntime.upgrade) and the registry pin is unchanged.
    */
-  async upgrade(id: string, authPublicKey: string, onStep: (s: BootstrapStepId) => void): Promise<void> {
-    const ws = this.registry.get(id);
-    if (!ws) throw new Error(`unknown local workspace ${id}`);
+  upgrade(id: string, authPublicKey: string, onStep: (s: BootstrapStepId) => void): Promise<void> {
+    // Registered as the in-flight runtime operation so quit (stopAll) waits for it instead of stopping postgres/the VM under it.
+    const p = this.upgradeNow(id, authPublicKey, onStep);
+    this.recovering = p;
+    return p.finally(() => {
+      if (this.recovering === p) this.recovering = null;
+    });
+  }
+
+  private async upgradeNow(id: string, authPublicKey: string, onStep: (s: BootstrapStepId) => void): Promise<void> {
+    if (!this.registry.get(id)) throw new Error(`unknown local workspace ${id}`);
     if (this.shuttingDown) throw new Error("app is quitting");
+    this.upgraded.add(id);
     const watched = this.supervisor.watching(id);
     this.supervisor.unwatch(id);
     try {
-      await this.runtime.upgrade(ws, {
+      // A stopped workspace's saved port may have been taken meanwhile: settle ports first, exactly as a normal start does.
+      const { workspace } = await this.reconcile(id);
+      await this.runtime.upgrade(workspace, {
         authPublicKey,
         onStep: (s) => onStep(stepFor(s)),
         onCommit: (image) => this.registry.setImage(id, image),
@@ -272,7 +289,8 @@ export class LocalWorkspaces {
     this.supervisor.unwatchAll();
     // A recovery already past its checks may be mid `machine start`: wait for it so we stop what it started.
     await this.recovering?.catch(() => undefined);
-    const ids = [...this.running];
+    // An upgrade may have brought a VM up for a workspace that never entered `running`: stop those too.
+    const ids = [...new Set([...this.running, ...this.upgraded])];
     for (const id of ids) {
       try {
         await this.fronts.get(id)?.close();
