@@ -7,7 +7,7 @@ import type {
   WorkspaceInfo,
 } from "../../shared/types";
 import { STEP_LABEL } from "../../shared/bootstrapState";
-import { PHASE_LABEL, failureCopy } from "../../shared/errorCopy";
+import { PHASE_LABEL, UPGRADE_COPY, failureCopy } from "../../shared/errorCopy";
 import {
   DEFAULT_LOCAL_LIMIT,
   isPlanLimitCode,
@@ -27,6 +27,7 @@ type Modal =
   | { kind: "wizard" };
 
 type Removal = { ws: WorkspaceInfo; busy: boolean; error: string | null };
+type Upgrade = { ws: WorkspaceInfo; error: string | null };
 
 export function Picker({ state }: { state: AuthState }) {
   const [load, setLoad] = useState<Load>({ phase: "loading" });
@@ -34,6 +35,7 @@ export function Picker({ state }: { state: AuthState }) {
   const [progress, setProgress] = useState<BootstrapProgress | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [removal, setRemoval] = useState<Removal | null>(null);
+  const [upgrade, setUpgrade] = useState<Upgrade | null>(null);
   // Name typed in Create, kept until the new row shows up in the list. slug is null while the create call is in flight
   // (progress can start before it resolves), then the new workspace's id. Never rendered; only its name is.
   const [created, setCreated] = useState<{ slug: string | null; name: string } | null>(null);
@@ -91,6 +93,16 @@ export function Picker({ state }: { state: AuthState }) {
     } else {
       setRemoval({ ws: target, busy: false, error: res.error ?? "Could not remove the workspace." });
     }
+  }
+
+  // The upgrade runs in main and reports through the same progress channel as setup; this call only starts it.
+  async function confirmUpgrade() {
+    if (!upgrade) return;
+    const target = upgrade.ws;
+    setUpgrade({ ws: target, error: null });
+    const r = await window.aw.upgradeLocalWorkspace(target.name);
+    if (r.ok) setUpgrade(null);
+    else setUpgrade({ ws: target, error: r.error ?? "Could not start the upgrade." });
   }
 
   function onCreateLocal() {
@@ -173,6 +185,7 @@ export function Picker({ state }: { state: AuthState }) {
                     ws={ws}
                     onRemove={() => setRemoval({ ws, busy: false, error: null })}
                     removeDisabled={removal?.busy === true}
+                    onUpgrade={() => setUpgrade({ ws, error: null })}
                     onFinish={async () => {
                       setNotice(null);
                       const r = await window.aw.finishLocalSetup(ws.name);
@@ -229,7 +242,7 @@ export function Picker({ state }: { state: AuthState }) {
             (created && (created.slug === null || created.slug === progress.slug) ? created.name : null)
           }
           onRetry={async () => {
-            const r = await window.aw.finishLocalSetup(progress.slug);
+            const r = progress.kind === "upgrade" ? await window.aw.upgradeLocalWorkspace(progress.slug) : await window.aw.finishLocalSetup(progress.slug);
             return r.ok ? null : (r.error ?? "Could not restart setup.");
           }}
           onClose={() => {
@@ -248,6 +261,9 @@ export function Picker({ state }: { state: AuthState }) {
             document.querySelector<HTMLElement>('[data-testid="local-block"] [data-remove]')?.focus();
           }}
         />
+      )}
+      {upgrade && !progress && (
+        <UpgradeModal upgrade={upgrade} onConfirm={() => void confirmUpgrade()} onCancel={() => setUpgrade(null)} />
       )}
       {removal && (
         <RemoveModal
@@ -277,12 +293,14 @@ function WorkspaceRow({
   ws,
   onFinish,
   onRemove,
+  onUpgrade,
   removeDisabled,
   cloud,
 }: {
   ws: WorkspaceInfo;
   onFinish: () => void;
   onRemove?: () => void;
+  onUpgrade?: () => void;
   removeDisabled?: boolean;
   cloud?: boolean;
 }) {
@@ -299,6 +317,12 @@ function WorkspaceRow({
       Remove
     </button>
   );
+  // Never automatic: the user opts in per workspace. Hidden while the workspace is mid-start.
+  const upgrade = onUpgrade && ws.upgrade_available && (ws.status === "running" || ws.status === "stopped" || ws.status === "needs_attention") && (
+    <button className="link" data-testid={`upgrade-${ws.name}`} aria-label={`${UPGRADE_COPY.title} ${label0}`} onClick={onUpgrade}>
+      {UPGRADE_COPY.title}
+    </button>
+  );
   const open = (
     <button className="secondary" onClick={() => window.aw.pickWorkspace(ws.name)}>
       {ws.display_name ?? ws.name}
@@ -311,6 +335,7 @@ function WorkspaceRow({
       <div className="workspace-row" data-testid={`here-${ws.name}`}>
         {open}
         <span className="dim">Runs on this Mac</span>
+        {upgrade}
         {remove}
       </div>
     );
@@ -331,6 +356,7 @@ function WorkspaceRow({
         <button className="primary" onClick={onFinish}>
           Retry
         </button>
+        {upgrade}
         {remove}
       </div>
     );
@@ -342,6 +368,7 @@ function WorkspaceRow({
       <button className="primary" onClick={onFinish}>
         Start
       </button>
+      {upgrade}
       {remove}
     </div>
   );
@@ -366,7 +393,15 @@ function ProgressModal({
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true" data-testid="bootstrap-progress">
       <div className="card modal">
-        <strong>{failed ? "Setup failed" : progress.phase === "done" ? "Your workspace is ready" : (label ? `Setting up ${label}` : "Setting up your workspace")}</strong>
+        <strong>
+          {failed
+            ? progress.kind === "upgrade" ? "Upgrade failed" : "Setup failed"
+            : progress.phase === "done"
+              ? "Your workspace is ready"
+              : progress.kind === "upgrade"
+                ? (label ? `Upgrading ${label}` : UPGRADE_COPY.progress)
+                : (label ? `Setting up ${label}` : "Setting up your workspace")}
+        </strong>
         {failed && label && <span className="dim" data-testid="bootstrap-name">{label}</span>}
         {!failed && <span className="dim" data-testid="bootstrap-phase">{progress.step ? STEP_LABEL[progress.step] : PHASE_LABEL.preparing}</span>}
         {failed && (
@@ -393,7 +428,39 @@ function ProgressModal({
             </button>
           </>
         )}
-        {!failed && <span className="dim">This can take several minutes the first time. You can leave this window open.</span>}
+        {!failed && progress.kind === "upgrade" && <span className="dim">This can take several minutes. Your data and apps are kept. You can leave this window open.</span>}
+        {!failed && progress.kind !== "upgrade" && <span className="dim">This can take several minutes the first time. You can leave this window open.</span>}
+      </div>
+    </div>
+  );
+}
+
+function UpgradeModal({
+  upgrade,
+  onConfirm,
+  onCancel,
+}: {
+  upgrade: Upgrade;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const name = upgrade.ws.display_name ?? upgrade.ws.name;
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true" data-testid="upgrade-modal">
+      <div className="card modal">
+        <strong>Upgrade “{name}”?</strong>
+        <span className="dim">{UPGRADE_COPY.confirm}</span>
+        {upgrade.error && (
+          <span className="error" data-testid="upgrade-error" role="alert">
+            {upgrade.error}
+          </span>
+        )}
+        <button className="primary" data-testid="upgrade-confirm" onClick={onConfirm}>
+          {upgrade.error ? "Retry" : UPGRADE_COPY.title}
+        </button>
+        <button className="link" data-testid="upgrade-cancel" onClick={onCancel}>
+          Cancel
+        </button>
       </div>
     </div>
   );

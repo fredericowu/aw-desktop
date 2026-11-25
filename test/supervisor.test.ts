@@ -184,7 +184,7 @@ const ok = (stdout = ""): RunResult => ({ code: 0, stdout, stderr: "" });
 function rtHarness(o: { machineRunning: boolean; engineUp: boolean; coreRunning: boolean; health: () => number }) {
   const cmds: string[] = [];
   const removed: string[] = [];
-  const fs: FsOps = { mkdirp() {}, writeFile() {}, readFile: () => "pw", isEmptyDir: () => false, rmrf: (p) => void removed.push(p) };
+  const fs: FsOps = { mkdirp() {}, writeFile() {}, readFile: (p: string) => (p.endsWith("upgrade.json") ? null : "pw"), isEmptyDir: () => false, rename() {}, listDir: () => [], exists: () => false, rmrf: (p) => void removed.push(p) };
   let t = 0;
   const rt = new LocalRuntime({ ...cfg, tmpRoot: "/tmp" }, {
     fs,
@@ -391,5 +391,42 @@ describe("Supervisor production defaults", () => {
     expect(html).toContain("<b>Needs attention</b>");
     expect(html).toContain("We couldn&#39;t restart this workspace. Try again.");
     expect(html).toContain("Retry");
+  });
+});
+
+describe("upgrade joins the shutdown lifecycle", () => {
+  const rec: LocalWorkspace = { id: "localaaa", name: "Box", sub: "1", uiPort: 9031, apiPort: 9032, createdAt: "t", cloud: "none" };
+  const make = () => {
+    const w = new LocalWorkspaces(() => null, async () => undefined);
+    vi.spyOn(w.registry, "get").mockReturnValue(rec);
+    vi.spyOn(w.registry, "reconcilePorts").mockResolvedValue({ workspace: rec } as never);
+    return w;
+  };
+
+  it("quit during an upgrade of a STOPPED workspace waits for it, then stops the VM the upgrade started", async () => {
+    const w = make();
+    const order: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    vi.spyOn(w.runtime, "upgrade").mockImplementation(async () => (order.push("upgrade"), await gate, order.push("upgraded"), { upgraded: true }));
+    vi.spyOn(w, "start").mockResolvedValue(rec);
+    vi.spyOn(w.runtime, "stop").mockImplementation(async () => void order.push("stop"));
+    const up = w.upgrade("localaaa", "k", () => undefined);
+    await new Promise((r) => setTimeout(r, 0));
+    const quit = w.stopAll();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(order).toEqual(["upgrade"]); // postgres/VM must not be stopped under the dump or restore
+    release();
+    await Promise.all([up.catch(() => undefined), quit]);
+    expect(order).toEqual(["upgrade", "upgraded", "stop"]);
+  });
+
+  it("settles ports before the upgrade and hands the reconciled workspace to the runtime", async () => {
+    const w = make();
+    (w.registry.reconcilePorts as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ workspace: { ...rec, apiPort: 9040 } });
+    const up = vi.spyOn(w.runtime, "upgrade").mockResolvedValue({ upgraded: true });
+    vi.spyOn(w, "start").mockResolvedValue(rec);
+    await w.upgrade("localaaa", "k", () => undefined);
+    expect(up.mock.calls[0][0].apiPort).toBe(9040);
   });
 });

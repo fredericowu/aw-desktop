@@ -22,7 +22,7 @@ export interface LocalWorkspace {
   createdAt: string;
   /** "none" = standalone. A later tunnel/connect phase just points at apiPort. */
   cloud: "none";
-  /** Core image this workspace was created with; its bind-mounted source is seeded from it, so it never changes. Absent = created before v0.1.18 (LEGACY_WORKSPACE_IMAGE). */
+  /** Core image this workspace runs. Its bind-mounted source is seeded from it at creation, and only an explicit in-place upgrade (LocalRuntime.upgrade) changes it. Absent = created before per-workspace pinning (LEGACY_WORKSPACE_IMAGE). */
   image?: string;
 }
 
@@ -252,6 +252,13 @@ export class LocalRegistry {
     if (next.length === f.workspaces.length) return false;
     this.save({ ...f, workspaces: next });
     return true;
+  }
+
+  /** Persist the core image a workspace is pinned to (set once an upgrade has been verified healthy). */
+  setImage(id: string, image: string): void {
+    const f = this.load();
+    if (!f.workspaces.some((w) => w.id === id)) throw new Error(`unknown local workspace ${id}`);
+    this.save({ ...f, workspaces: f.workspaces.map((w) => (w.id === id ? { ...w, image } : w)) });
   }
 
   /** At start: a persisted port that is busy (and not ours-in-use) is bumped and re-persisted.

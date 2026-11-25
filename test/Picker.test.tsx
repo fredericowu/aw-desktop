@@ -31,6 +31,7 @@ function bridge(over: Partial<AwBridge> & { workspaces?: WorkspaceInfo[]; localC
     pickWorkspace: vi.fn(async () => ({ ok: true })),
     finishLocalSetup: vi.fn(async () => ({ ok: true, data: null })),
     removeLocalWorkspace: vi.fn(async () => ({ ok: true, data: null })),
+    upgradeLocalWorkspace: vi.fn(async (): Promise<ApiResult<null>> => ({ ok: true, data: null })),
     getBootstrapProgress: vi.fn(async (): Promise<BootstrapProgress | null> => null),
     onBootstrapProgress: vi.fn((cb: (p: BootstrapProgress) => void) => {
       emitProgress = cb;
@@ -464,5 +465,76 @@ describe("Remove local workspace", () => {
     fireEvent.click(screen.getByTestId("limit-remove"));
     expect(screen.queryByText("You've hit your free-tier limit")).toBeNull();
     expect(document.activeElement?.getAttribute("data-testid")).toBe("remove-a");
+  });
+});
+
+describe("Upgrade local workspace", () => {
+  const old = (over: Partial<WorkspaceInfo> = {}) => ws({ name: "localaaa", display_name: "Mine", status: "running", upgrade_available: true, ...over });
+
+  it("offers Upgrade only on a local row whose core is older, never on a current one or a cloud row", async () => {
+    bridge({ workspaces: [old(), ws({ name: "localbbb", display_name: "Fresh", status: "running" }), ws({ name: "acme", placement_driver: "hosted", is_hosted: true, status: "running", upgrade_available: true })] });
+    render(<Picker state={state} />);
+    await screen.findByTestId("upgrade-localaaa");
+    expect(screen.queryByTestId("upgrade-localbbb")).toBeNull();
+    expect(screen.queryByTestId("upgrade-acme")).toBeNull();
+  });
+
+  it("is hidden while the workspace is mid-start", async () => {
+    bridge({ workspaces: [old({ status: "starting", detail: "Starting workspace..." })] });
+    render(<Picker state={state} />);
+    await screen.findByTestId("starting-localaaa");
+    expect(screen.queryByTestId("upgrade-localaaa")).toBeNull();
+  });
+
+  it("is explicit: clicking only opens a confirmation, nothing runs until it is confirmed; Cancel runs nothing", async () => {
+    const b = bridge({ workspaces: [old()] });
+    render(<Picker state={state} />);
+    fireEvent.click(await screen.findByTestId("upgrade-localaaa"));
+    const modal = await screen.findByTestId("upgrade-modal");
+    expect(modal.textContent).toContain("Your data and installed apps are kept");
+    expect(modal.textContent).toContain("restored");
+    expect(b.upgradeLocalWorkspace).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("upgrade-cancel"));
+    expect(screen.queryByTestId("upgrade-modal")).toBeNull();
+    expect(b.upgradeLocalWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("confirming starts the upgrade by workspace id, once", async () => {
+    const b = bridge({ workspaces: [old({ status: "stopped" })] });
+    render(<Picker state={state} />);
+    fireEvent.click(await screen.findByTestId("upgrade-localaaa"));
+    fireEvent.click(await screen.findByTestId("upgrade-confirm"));
+    await waitFor(() => expect(b.upgradeLocalWorkspace).toHaveBeenCalledTimes(1));
+    expect(b.upgradeLocalWorkspace).toHaveBeenCalledWith("localaaa");
+    expect(b.finishLocalSetup).not.toHaveBeenCalled();
+    expect(b.removeLocalWorkspace).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByTestId("upgrade-modal")).toBeNull());
+  });
+
+  it("a refusal (another setup is running) is shown in the dialog and can be retried", async () => {
+    const b = bridge({ workspaces: [old()] });
+    b.upgradeLocalWorkspace.mockResolvedValueOnce({ ok: false, error: "A setup is already running on this Mac.", code: "bootstrap_running" });
+    render(<Picker state={state} />);
+    fireEvent.click(await screen.findByTestId("upgrade-localaaa"));
+    fireEvent.click(await screen.findByTestId("upgrade-confirm"));
+    expect((await screen.findByTestId("upgrade-error")).textContent).toContain("already running");
+    fireEvent.click(screen.getByTestId("upgrade-confirm"));
+    await waitFor(() => expect(b.upgradeLocalWorkspace).toHaveBeenCalledTimes(2));
+  });
+
+  it("progress and failure use upgrade wording, never setup wording, and Retry re-runs the UPGRADE", async () => {
+    const b = bridge({ workspaces: [old()] });
+    render(<Picker state={state} />);
+    await screen.findByTestId("local-block");
+    emitProgress({ slug: "localaaa", kind: "upgrade", phase: "running", step: "workspace", done: [], lines: [] });
+    const modal = await screen.findByTestId("bootstrap-progress");
+    expect(modal.textContent).toContain("Upgrading Mine");
+    expect(modal.textContent).not.toContain("Setting up");
+    emitProgress({ slug: "localaaa", kind: "upgrade", phase: "failed", step: "workspace", done: [], lines: [], error: "The upgrade didn't complete. Your workspace was restored and works as before." });
+    await screen.findByText("Upgrade failed");
+    expect(screen.getByTestId("bootstrap-error").textContent).toContain("restored");
+    fireEvent.click(screen.getByText("Retry"));
+    await waitFor(() => expect(b.upgradeLocalWorkspace).toHaveBeenCalledWith("localaaa"));
+    expect(b.finishLocalSetup).not.toHaveBeenCalled();
   });
 });

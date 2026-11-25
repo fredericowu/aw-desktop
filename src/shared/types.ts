@@ -27,6 +27,8 @@ export interface WorkspaceInfo {
   display_name?: string;
   /** Local rows only: plain-language line for "starting" / "needs_attention" (never raw engine text). */
   detail?: string;
+  /** Local rows only: the workspace runs an older core than the one bundled with this app (offer "Upgrade workspace"). */
+  upgrade_available?: boolean;
 }
 
 /** GET /api/accounts/me — limits + local_count are added by aw-backend's
@@ -99,6 +101,8 @@ export interface AwBridge {
   createLocalWorkspace(name: string): Promise<ApiResult<WorkspaceInfo>>;
   /** Start (or resume / retry) an existing local workspace and open it. Never creates one. */
   finishLocalSetup(slug: string): Promise<ApiResult<null>>;
+  /** Explicit, user-confirmed in-place upgrade of one local workspace to the bundled core (data and apps preserved, rolled back on failure). Progress arrives as a `kind: "upgrade"` bootstrap progress. */
+  upgradeLocalWorkspace(slug: string): Promise<ApiResult<null>>;
   /** Delete a local workspace and everything it owns (machine, containers, data, registry entry). */
   removeLocalWorkspace(slug: string): Promise<ApiResult<null>>;
   getBootstrapProgress(): Promise<BootstrapProgress | null>;
@@ -115,6 +119,8 @@ export type BootstrapStepId = "machine" | "image" | "postgres" | "redis" | "work
 
 export interface BootstrapProgress {
   slug: string;
+  /** "upgrade" = an in-place core upgrade (absent = normal setup). Drives the modal copy only. */
+  kind?: "upgrade";
   phase: "running" | "failed" | "done";
   step: BootstrapStepId | null;
   done: BootstrapStepId[];

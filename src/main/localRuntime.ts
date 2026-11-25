@@ -13,7 +13,7 @@
 import { execFile } from "node:child_process";
 import { get as httpGet } from "node:http";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, isAbsolute } from "node:path";
 import type { LocalWorkspace } from "./localRegistry";
 
@@ -26,6 +26,58 @@ export const POSTGRES_IMAGE =
   "docker.io/pgvector/pgvector@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb";
 export const REDIS_IMAGE =
   "docker.io/library/redis@sha256:a8f08480e1f88f2647fed492d1178c06abb0d0c1fbf02c682a61e2f483fb3954";
+
+/** Top-level entries of the core image that an upgrade never overwrites: runtime state (installed apps, secrets,
+ * venv under .aw-workspace), the user's own checkouts, and CLI credentials. Mirrors aw-remote-host's
+ * syncWorkspaceSource, plus the user-owned directories a local workspace can also hold. */
+export const UPGRADE_PRESERVED = new Set([
+  ".aw-workspace", "apps", "repos", ".tmp", ".worktrees",
+  ".claude", ".claude.json", ".codex", ".copilot", ".cursor",
+  ".ssh", ".git-credentials", ".gitconfig",
+]);
+
+/** The image a workspace is pinned to (absent pin = created before per-workspace pinning). */
+export const pinnedImage = (ws: Pick<LocalWorkspace, "image">): string => ws.image ?? LEGACY_WORKSPACE_IMAGE;
+
+/** True when the workspace runs a different core image than the bundled one. */
+export const upgradeAvailable = (ws: Pick<LocalWorkspace, "image">): boolean => pinnedImage(ws) !== WORKSPACE_IMAGE;
+
+type UpgradePhase = "staged" | "stopped" | "dumped" | "swapping" | "core_starting" | "committed" | "rolled_back";
+const PHASE_ORDER: UpgradePhase[] = ["staged", "stopped", "dumped", "swapping", "core_starting", "committed", "rolled_back"];
+
+/** Persisted before the first destructive step, so a crash at any point can be undone (or finished) on the next start. */
+interface UpgradeJournal {
+  v: 1;
+  from: string;
+  to: string;
+  phase: UpgradePhase;
+  /** Scratch dir holding the staged tree and the backed-up entries; a sibling of the workspace dir. */
+  root: string;
+  dump: string;
+  replace: string[];
+  add: string[];
+}
+
+export class UpgradeFailedError extends Error {
+  constructor(
+    public readonly cause: unknown,
+    /** True when the previous core is running again (or was never touched). False: needs attention, a retry resumes the rollback. */
+    public readonly rolledBack: boolean,
+  ) {
+    super(`upgrade failed (${rolledBack ? "rolled back" : "NOT rolled back"}): ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = "UpgradeFailedError";
+  }
+}
+
+export interface UpgradeOptions {
+  authPublicKey?: string;
+  onStep?: (step: string) => void;
+  healthTimeoutMs?: number;
+  /** Image to move to. Defaults to the bundled WORKSPACE_IMAGE. */
+  targetImage?: string;
+  /** Called once the new core is healthy, BEFORE the old container is discarded: persist the new pin here. */
+  onCommit?: (image: string) => void;
+}
 
 const CONTAINER_WORKDIR = "/opt/aw-workspace";
 const CONTAINER_HOME = "/home/ubuntu";
@@ -74,6 +126,11 @@ export interface FsOps {
   isEmptyDir(p: string): boolean;
   /** Recursive, forced delete; a missing path is not an error. */
   rmrf(p: string): void;
+  /** Atomic move on one filesystem. Throws when `from` is missing. */
+  rename(from: string, to: string): void;
+  /** Entry names of a directory; [] when it does not exist. */
+  listDir(p: string): string[];
+  exists(p: string): boolean;
 }
 export const realFs: FsOps = {
   mkdirp: (p) => void mkdirSync(p, { recursive: true }),
@@ -90,6 +147,17 @@ export const realFs: FsOps = {
     }
   },
   rmrf: (p) => rmSync(p, { recursive: true, force: true }),
+  rename: (from, to) => renameSync(from, to),
+  listDir: (p) => {
+    try {
+      return readdirSync(p);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") return [];
+      throw err;
+    }
+  },
+  exists: (p) => existsSync(p),
 };
 
 export interface RuntimeConfig {
@@ -437,6 +505,36 @@ export class LocalRuntime {
     return true;
   }
 
+  /** Network, images, postgres (password + database + extension) and redis: everything the core needs besides itself.
+   * Idempotent; shared by a normal start and an upgrade. Returns the postgres password. */
+  private async ensureBackends(id: string, paths: WorkspacePaths, images: string[], step: (s: string) => void): Promise<string> {
+    const names = containerNames(id);
+    step("image");
+    await this.ensureNetwork(id);
+    for (const img of images) await this.pullIfMissing(id, img);
+
+    const password = await this.password(paths);
+
+    step("postgres");
+    await this.ensureContainer(id, names.postgres, postgresRunArgs(id, password, paths.postgres));
+    await this.waitFor(
+      "postgres",
+      async () => (await this.raw(id, ["--connection", machineName(id), "exec", names.postgres, "psql", "-h", "127.0.0.1", "-U", "postgres", "-c", "select 1"])).code === 0,
+      90_000,
+    );
+    // Password is only applied on first init; re-apply so a lost password file self-corrects.
+    await this.pm(id, ["exec", names.postgres, "psql", "-h", "127.0.0.1", "-U", "postgres", "-c", `ALTER USER postgres WITH PASSWORD '${password}';`]);
+    const hasDb = await this.pm(id, ["exec", names.postgres, "psql", "-h", "127.0.0.1", "-U", "postgres", "-tAc", "SELECT 1 FROM pg_database WHERE datname='aw_workspace'"]);
+    if (hasDb.stdout.trim() !== "1") {
+      await this.pm(id, ["exec", names.postgres, "psql", "-h", "127.0.0.1", "-U", "postgres", "-c", "CREATE DATABASE aw_workspace;"]);
+    }
+    await this.pm(id, ["exec", names.postgres, "psql", "-h", "127.0.0.1", "-U", "postgres", "-d", "aw_workspace", "-c", "CREATE EXTENSION IF NOT EXISTS vector;"]);
+
+    step("redis");
+    await this.ensureContainer(id, names.redis, redisRunArgs(id, paths.redis));
+    return password;
+  }
+
   /** Bring everything up in order: machine, network, postgres, redis, core, health. Surfaces every failure. */
   async start(ws: LocalWorkspace, opts: StartOptions = {}): Promise<void> {
     const id = ws.id;
@@ -459,29 +557,9 @@ export class LocalRuntime {
     }
     if (!running) await this.machineStart(id);
 
-    step("image");
-    await this.ensureNetwork(id);
-    for (const img of [POSTGRES_IMAGE, REDIS_IMAGE, image]) await this.pullIfMissing(id, img);
-
-    const password = await this.password(paths);
-
-    step("postgres");
-    await this.ensureContainer(id, names.postgres, postgresRunArgs(id, password, paths.postgres));
-    await this.waitFor(
-      "postgres",
-      async () => (await this.raw(id, ["--connection", machineName(id), "exec", names.postgres, "psql", "-h", "127.0.0.1", "-U", "postgres", "-c", "select 1"])).code === 0,
-      90_000,
-    );
-    // Password is only applied on first init; re-apply so a lost password file self-corrects.
-    await this.pm(id, ["exec", names.postgres, "psql", "-h", "127.0.0.1", "-U", "postgres", "-c", `ALTER USER postgres WITH PASSWORD '${password}';`]);
-    const hasDb = await this.pm(id, ["exec", names.postgres, "psql", "-h", "127.0.0.1", "-U", "postgres", "-tAc", "SELECT 1 FROM pg_database WHERE datname='aw_workspace'"]);
-    if (hasDb.stdout.trim() !== "1") {
-      await this.pm(id, ["exec", names.postgres, "psql", "-h", "127.0.0.1", "-U", "postgres", "-c", "CREATE DATABASE aw_workspace;"]);
-    }
-    await this.pm(id, ["exec", names.postgres, "psql", "-h", "127.0.0.1", "-U", "postgres", "-d", "aw_workspace", "-c", "CREATE EXTENSION IF NOT EXISTS vector;"]);
-
-    step("redis");
-    await this.ensureContainer(id, names.redis, redisRunArgs(id, paths.redis));
+    const password = await this.ensureBackends(id, paths, [POSTGRES_IMAGE, REDIS_IMAGE, image], step);
+    // An upgrade that was interrupted (app quit, crash, power loss) is rolled back before anything else touches the core.
+    await this.recoverUpgrade(ws, paths, password);
 
     step("workspace");
     await this.seedWorkspaceDir(id, image, paths);
@@ -518,6 +596,222 @@ export class LocalRuntime {
       }
     }
     await this.ensureContainer(id, name, workspaceRunArgs(input));
+  }
+
+  // ---- in-place core upgrade ----
+  private journalPath(paths: WorkspacePaths): string {
+    return join(paths.data, "upgrade.json");
+  }
+  /** No journal = no upgrade in flight. A journal that exists but cannot be read is NOT "none": guessing could pair the old
+   * core with the new source, so it is surfaced and the workspace stays in needs-attention until it is resolved by hand. */
+  private readJournal(paths: WorkspacePaths): UpgradeJournal | null {
+    const raw = this.fs.readFile(this.journalPath(paths));
+    if (raw === null) return null;
+    try {
+      const j = JSON.parse(raw) as UpgradeJournal;
+      if (j && j.v === 1 && PHASE_ORDER.includes(j.phase)) return j;
+    } catch {
+      // fall through
+    }
+    throw new Error(`upgrade journal ${this.journalPath(paths)} is unreadable; refusing to guess the workspace state`);
+  }
+  /** Write-then-rename: a crash leaves either the previous journal or the new one, never a truncated file. */
+  private writeJournal(paths: WorkspacePaths, j: UpgradeJournal): void {
+    const file = this.journalPath(paths);
+    this.fs.writeFile(`${file}.tmp`, JSON.stringify(j));
+    this.fs.rename(`${file}.tmp`, file);
+  }
+  private async pgExec(id: string, args: string[], timeoutMs?: number): Promise<RunResult> {
+    return this.pm(id, ["exec", containerNames(id).postgres, ...args], timeoutMs);
+  }
+
+  /**
+   * Move ONE existing workspace to another core image in place. The core's source tree is a bind mount seeded from
+   * the image at creation, so the image pin alone changes nothing: this also swaps the image-owned entries of that
+   * tree (never UPGRADE_PRESERVED: installed apps, secrets, user checkouts) and keeps the database, redis and the
+   * data dir untouched. Order: pull, stage the new tree, stop the core, dump the DB, swap the tree by rename (old
+   * entries kept), recreate the core (old container kept, renamed), wait healthy, commit. Any failure after the
+   * core is stopped runs the exact reverse; a crash leaves a journal that start() finishes. Never uses
+   * bootstrap-workspace --force or unlink, and never removes the VM, postgres or redis.
+   */
+  async upgrade(ws: LocalWorkspace, opts: UpgradeOptions = {}): Promise<{ upgraded: boolean }> {
+    const id = ws.id;
+    const step = opts.onStep ?? (() => undefined);
+    const target = opts.targetImage ?? WORKSPACE_IMAGE;
+    const from = pinnedImage(ws);
+    const paths = this.prepare(id);
+    const names = containerNames(id);
+    const prev = `${names.workspace}-prev`;
+    let journal: UpgradeJournal | null = null;
+    let scratch: string | null = null;
+    let pinned = false;
+    let password = "";
+    try {
+      step("machine");
+      if (!(await this.machineExists(id))) throw new Error(`no machine for workspace ${id}`);
+      if (!(await this.machineRunning(id))) await this.machineStart(id);
+      password = await this.ensureBackends(id, paths, [POSTGRES_IMAGE, REDIS_IMAGE, target], step);
+      // A leftover from an interrupted attempt is resolved first (rolled back, or its cleanup finished).
+      await this.recoverUpgrade(ws, paths, password);
+      if (from === target) return { upgraded: false };
+
+      // 1. Stage the new tree beside the workspace dir, while the old core is still serving.
+      const stamp = String(this.clock());
+      const root = join(paths.data, `upgrade-${stamp}`);
+      scratch = root;
+      const stage = join(root, "stage");
+      const backup = join(root, "backup");
+      this.fs.mkdirp(stage);
+      this.fs.mkdirp(backup);
+      const seed = `aw-${id}-upgrade-seed`;
+      await this.raw(id, ["--connection", machineName(id), "rm", "-f", seed]); // stale seed from a killed attempt: ignore the result
+      await this.pm(id, ["create", "--pull=never", "--name", seed, target]);
+      try {
+        await this.pm(id, ["cp", `${seed}:${CONTAINER_WORKDIR}/.`, stage], 1_800_000);
+      } finally {
+        await this.raw(id, ["--connection", machineName(id), "rm", "-f", seed]);
+      }
+      const shipped = this.fs.listDir(stage).filter((n) => !UPGRADE_PRESERVED.has(n));
+      if (shipped.length === 0) throw new Error("the new core image shipped no source tree");
+      const replace = shipped.filter((n) => this.fs.exists(join(paths.workspace, n)));
+      const add = shipped.filter((n) => !replace.includes(n));
+      journal = { v: 1, from, to: target, phase: "staged", root, dump: `aw-upgrade-${stamp}.dump`, replace, add };
+      this.writeJournal(paths, journal);
+
+      // 2. Stop the old core (kept, not removed) and take a consistent DB dump: the new core migrates it forward.
+      step("workspace");
+      if (await this.exists(id, ["container", "exists", names.workspace])) {
+        await this.raw(id, ["--connection", machineName(id), "rm", "-f", prev]);
+        await this.pm(id, ["stop", names.workspace], 120_000);
+      }
+      journal = this.advanceJournal(paths, journal, "stopped");
+      await this.pgExec(id, ["pg_dump", "-h", "127.0.0.1", "-U", "postgres", "-Fc", "-f", `/var/lib/postgresql/data/${journal.dump}`, "aw_workspace"], 1_800_000);
+      journal = this.advanceJournal(paths, journal, "dumped");
+
+      // 3. Swap the image-owned entries by rename (same filesystem): old ones are parked in backup/, never copied or deleted.
+      journal = this.advanceJournal(paths, journal, "swapping");
+      for (const n of replace) this.fs.rename(join(paths.workspace, n), join(backup, n));
+      for (const n of shipped) this.fs.rename(join(stage, n), join(paths.workspace, n));
+
+      // 4. Recreate the core on the new image; the old container stays, renamed, for rollback.
+      if (await this.exists(id, ["container", "exists", names.workspace])) await this.pm(id, ["rename", names.workspace, prev]);
+      const socketPath = await this.vmSocketPath(id);
+      const input: WorkspaceRunInput = { ws, paths, password, socketPath, image: target, workers: this.cfg.workers ?? 2, authPublicKey: opts.authPublicKey };
+      journal = this.advanceJournal(paths, journal, "core_starting");
+      await this.pm(id, workspaceRunArgs(input));
+      step("health");
+      // strict=1: a core that answers 200 but reports a component down ("degraded") must not pass the commit gate.
+      const url = `http://127.0.0.1:${ws.apiPort}/api/health?strict=1`;
+      await this.waitFor("workspace health", async () => (await this.status(url)) === 200, opts.healthTimeoutMs ?? 300_000);
+
+      // 5. Commit: persist the new pin first. From here the upgrade is DONE: nothing below may roll it back
+      // (recovery resolves the boundary by the persisted pin), only best-effort bookkeeping remains.
+      opts.onCommit?.(target);
+      pinned = true;
+      try {
+        journal = this.advanceJournal(paths, journal, "committed");
+        step("running");
+        await this.finishUpgradeCleanup(id, paths, journal);
+      } catch {
+        // journal/cleanup leftovers are resolved forward by the next start (pin === journal.to)
+      }
+      return { upgraded: true };
+    } catch (err) {
+      if (!journal) {
+        // Nothing destructive ran (pull/stage failed): the old core was never stopped. Drop the scratch dir, if any.
+        if (scratch) this.fs.rmrf(scratch);
+        throw new UpgradeFailedError(err, true);
+      }
+      if (pinned) return { upgraded: true };
+      let rolledBack = false;
+      try {
+        await this.rollbackUpgrade(ws, paths, password, journal);
+        rolledBack = true;
+      } catch {
+        // journal stays on disk: the next start() retries the rollback
+      }
+      throw new UpgradeFailedError(err, rolledBack);
+    }
+  }
+
+  private advanceJournal(paths: WorkspacePaths, j: UpgradeJournal, phase: UpgradePhase): UpgradeJournal {
+    const next = { ...j, phase };
+    this.writeJournal(paths, next);
+    return next;
+  }
+
+  /** Called at start/upgrade entry: finish or undo an upgrade that never reached its end. No-op without a journal. */
+  async recoverUpgrade(ws: LocalWorkspace, paths: WorkspacePaths, password: string): Promise<void> {
+    const j = this.readJournal(paths);
+    if (!j) return;
+    // The persisted pin is the commit point (it is saved before the journal says "committed"): a pin equal to the
+    // target means the new core was verified healthy, so resolve FORWARD even if the journal write never landed.
+    // "rolled_back" means the restore finished and only cleanup was interrupted: never replay the restore.
+    if (j.phase === "committed" || j.phase === "rolled_back" || pinnedImage(ws) === j.to) {
+      await this.finishUpgradeCleanup(ws.id, paths, j);
+      return;
+    }
+    await this.rollbackUpgrade(ws, paths, password, j);
+  }
+
+  /** The exact reverse of upgrade(); idempotent, so it can resume a rollback that itself was interrupted. */
+  private async rollbackUpgrade(ws: LocalWorkspace, paths: WorkspacePaths, password: string, j: UpgradeJournal): Promise<void> {
+    const id = ws.id;
+    const names = containerNames(id);
+    const prev = `${names.workspace}-prev`;
+    const reached = (p: UpgradePhase) => PHASE_ORDER.indexOf(j.phase) >= PHASE_ORDER.indexOf(p);
+    const backup = join(j.root, "backup");
+
+    // a. The new core (if it was ever created) goes first: it holds the DB and the ports.
+    if (reached("core_starting")) await this.raw(id, ["--connection", machineName(id), "rm", "-f", names.workspace]);
+    // b. A core that ran against the DB may have migrated it forward: put the pre-upgrade dump back.
+    if (reached("core_starting")) {
+      const file = `/var/lib/postgresql/data/${j.dump}`;
+      const psql = ["psql", "-h", "127.0.0.1", "-U", "postgres", "-d", "postgres", "-c"];
+      await this.pgExec(id, [...psql, "DROP DATABASE IF EXISTS aw_workspace WITH (FORCE)"]);
+      await this.pgExec(id, [...psql, "CREATE DATABASE aw_workspace"]);
+      await this.pgExec(id, ["pg_restore", "-h", "127.0.0.1", "-U", "postgres", "-d", "aw_workspace", file], 1_800_000);
+    }
+    // c. Source tree: put parked entries back, drop entries that did not exist before.
+    if (reached("swapping")) {
+      for (const n of j.replace) {
+        if (this.fs.exists(join(backup, n))) {
+          this.fs.rmrf(join(paths.workspace, n));
+          this.fs.rename(join(backup, n), join(paths.workspace, n));
+        }
+      }
+      for (const n of j.add) this.fs.rmrf(join(paths.workspace, n));
+    }
+    // d. The old core container back under its own name, running, on its own image.
+    const hasMain = await this.exists(id, ["container", "exists", names.workspace]);
+    if (!hasMain && (await this.exists(id, ["container", "exists", prev]))) await this.pm(id, ["rename", prev, names.workspace]);
+    const socketPath = await this.vmSocketPath(id);
+    const input: WorkspaceRunInput = { ws, paths, password, socketPath, image: j.from, workers: this.cfg.workers ?? 2 };
+    // Port-aware: recreates the old core when its published port is no longer the workspace's (reconciled) port.
+    await this.ensureWorkspaceContainer(id, input);
+    const url = `http://127.0.0.1:${ws.apiPort}/api/health`;
+    await this.waitFor("restored workspace health", async () => (await this.status(url)) === 200, 180_000);
+    // Terminal marker BEFORE the dump is deleted: a crash during cleanup must never replay the DB restore without it.
+    this.writeJournal(paths, { ...j, phase: "rolled_back" });
+    await this.finishUpgradeCleanup(id, paths, j);
+  }
+
+  /** Discard what an upgrade leaves behind. Best effort: garbage left here costs disk, never correctness. */
+  private async finishUpgradeCleanup(id: string, paths: WorkspacePaths, j: UpgradeJournal): Promise<void> {
+    const names = containerNames(id);
+    for (const task of [
+      () => this.raw(id, ["--connection", machineName(id), "rm", "-f", `${names.workspace}-prev`]),
+      () => this.raw(id, ["--connection", machineName(id), "rm", "-f", `aw-${id}-upgrade-seed`]),
+      () => this.pgExec(id, ["rm", "-f", `/var/lib/postgresql/data/${j.dump}`]),
+      async () => this.fs.rmrf(j.root),
+    ]) {
+      try {
+        await task();
+      } catch {
+        // see above
+      }
+    }
+    this.fs.rmrf(this.journalPath(paths));
   }
 
   /** Stop the three containers (best effort is NOT used: failures throw) then the machine. */

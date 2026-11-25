@@ -125,6 +125,25 @@ Once those are set as GitHub Actions secrets on this repo, pushing a `v*`
 tag (or a manual `workflow_dispatch`) builds, signs, notarizes, and
 publishes a GitHub Release that `electron-updater` consumes.
 
+## Upgrading an existing local workspace
+
+A local workspace is pinned to the core image it was created with (`LocalWorkspace.image`; absent = v0.158.0) and its
+source tree is a bind mount seeded from that image, so a new app build never changes it by itself. A picker row whose
+core is older than the bundled `WORKSPACE_IMAGE` shows **Upgrade workspace** (`upgrade_available`). It is explicit: a
+confirmation dialog first, never automatic. `LocalRuntime.upgrade` then, for that one workspace only:
+
+1. pulls the bundled image and stages its source tree beside the workspace dir (the old core keeps serving);
+2. stops the old core (container kept) and takes a `pg_dump` of the workspace database;
+3. swaps the image-owned top-level entries by rename, parking the old ones (never `UPGRADE_PRESERVED`: `.aw-workspace`
+   with installed apps and secrets, `apps`, `repos`, CLI credentials);
+4. recreates the core on the new image (old container renamed, not removed) and waits for health;
+5. only then persists the new pin, and discards the parked entries, dump and old container.
+
+Any failure after step 2 reverses it exactly (drops the new core, restores the dump if the new core ever ran, renames the
+parked entries back, restarts the old container) and the pin stays unchanged. A journal (`upgrade.json` in the workspace
+data dir) lets the next start finish a rollback that was itself interrupted. It never uses `bootstrap-workspace --force`
+or unlink, and never removes the VM, postgres or redis. Real-podman hooks: `e2e/phaseE/README.md`.
+
 ## Releasing (macOS + Windows)
 
 `.github/workflows/release.yml` ("Desktop Release") builds and publishes

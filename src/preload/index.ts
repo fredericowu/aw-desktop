@@ -13,6 +13,7 @@ const bridge: AwBridge = {
   preflight: () => ipcRenderer.invoke("aw:preflight"),
   createLocalWorkspace: (name) => ipcRenderer.invoke("aw:createLocalWorkspace", name),
   finishLocalSetup: (slug) => ipcRenderer.invoke("aw:finishLocalSetup", slug),
+  upgradeLocalWorkspace: (slug) => ipcRenderer.invoke("aw:upgradeLocalWorkspace", slug),
   removeLocalWorkspace: (slug) => ipcRenderer.invoke("aw:removeLocalWorkspace", slug),
   getBootstrapProgress: () => ipcRenderer.invoke("aw:getBootstrapProgress"),
   onBootstrapProgress: (cb: (p: BootstrapProgress) => void) => {

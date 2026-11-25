@@ -40,6 +40,7 @@ function harness(handler: (args: string[]) => RunResult | undefined = () => unde
     writeFile: (p, d) => void (files[p] = d),
     readFile: (p) => files[p] ?? null,
     isEmptyDir: () => empty,
+    rename() {}, listDir: () => [], exists: () => false,
     rmrf: (p) => void removed.push(p),
   };
   let t = 0;
@@ -69,7 +70,7 @@ function harness(handler: (args: string[]) => RunResult | undefined = () => unde
 describe("machineStart stale sockets", () => {
   it("removes this workspace's leftover gvproxy/api/machine sockets, and only those, before `machine start`", async () => {
     const order: string[] = [];
-    const fs: FsOps = { mkdirp() {}, writeFile() {}, readFile: () => null, isEmptyDir: () => true, rmrf: (p) => void order.push(`rm ${p}`) };
+    const fs: FsOps = { mkdirp() {}, writeFile() {}, readFile: () => null, isEmptyDir: () => true, rename() {}, listDir: () => [], exists: () => false, rmrf: (p) => void order.push(`rm ${p}`) };
     const rt = new LocalRuntime({ ...cfg, tmpRoot: "/tmp" }, {
       fs,
       run: async (_c, args) => { order.push(args.join(" ")); return ok(); },
@@ -232,7 +233,7 @@ describe("start sequence", () => {
     const calls: string[][] = [];
     let t = 0;
     const rt = new LocalRuntime(cfg, {
-      fs: { mkdirp() {}, writeFile() {}, readFile: () => "pw", isEmptyDir: () => false, rmrf() {} },
+      fs: { mkdirp() {}, writeFile() {}, readFile: (p: string) => (p.endsWith("upgrade.json") ? null : "pw"), isEmptyDir: () => false, rename() {}, listDir: () => [], exists: () => false, rmrf() {} },
       sleep: async () => void (t += 1000),
       now: () => t,
       httpStatus: async () => 0,

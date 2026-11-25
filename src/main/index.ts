@@ -12,13 +12,14 @@ import { guardedOpen, persistSessionSafely } from "./safeOpen";
 import { preflight } from "./preflight";
 import { classifyError, looksLikeEngineText, type ClassifiedError } from "./errorClassifier";
 import { appendDiagnostic, readDiagnosticTail } from "./diagnostics";
-import { PodmanCommandError } from "./localRuntime";
+import { PodmanCommandError, UpgradeFailedError, upgradeAvailable } from "./localRuntime";
 import { LocalWorkspaces, cachedIdentityPublicKey, identityPublicKey } from "./localWorkspaces";
 import { createBannerView } from "./bannerView";
 import { RecoveryBanner } from "./recoveryBanner";
 import { LocalLimitReachedError } from "./localRegistry";
 import { openIfCurrent, SessionScope, type SessionHandle, SetupSlot, scopedExclusive } from "./localBootstrap";
 import { advance, complete, fail, startProgress } from "../shared/bootstrapState";
+import { UPGRADE_COPY } from "../shared/errorCopy";
 import { LOCAL_PLACEMENT } from "../shared/workspaces";
 import type { AccountInfo, ApiResult, AuthState, AwUser, BootstrapProgress, WorkspaceInfo, WorkspaceListData } from "../shared/types";
 
@@ -301,6 +302,38 @@ async function startLocal(id: string, scope: SessionHandle): Promise<void> {
   }
 }
 
+/** Caller must already hold the slot; this releases it. Upgrades the local workspace to the bundled core, then opens it.
+ * The workspace window (if open) is closed first: its core is stopped and swapped. On failure the previous core is restored. */
+async function upgradeLocal(id: string, scope: SessionHandle): Promise<void> {
+  try {
+    if (!scope.isCurrent() || !currentToken) throw new Error("session_lost");
+    emitBootstrap({ ...startProgress(id), kind: "upgrade" }, scope.isCurrent);
+    const ws = local.registry.get(id);
+    if (ws && shellLocalPort === ws.uiPort) {
+      shellWindow?.close();
+      shellWindow = null;
+      shellLocalPort = null;
+    }
+    const key = cachedIdentityPublicKey() ?? (await identityPublicKey());
+    await local.upgrade(id, key, (step) => {
+      if (bootstrapProgress && bootstrapProgress.slug === id) emitBootstrap(advance(bootstrapProgress, step), scope.isCurrent);
+    });
+    if (scope.isCurrent()) {
+      emitBootstrap(complete(bootstrapProgress ?? { ...startProgress(id), kind: "upgrade" }), scope.isCurrent);
+      await openWorkspace(id, scope.isCurrent);
+      bootstrapProgress = null;
+    }
+  } catch (err) {
+    const c = logFailure("upgrade_local", err);
+    const message = err instanceof UpgradeFailedError ? (err.rolledBack ? UPGRADE_COPY.failedRestored : UPGRADE_COPY.failedAttention) : c.message;
+    emitBootstrap(fail(bootstrapProgress ?? { ...startProgress(id), kind: "upgrade" }, message, c.code), scope.isCurrent);
+  } finally {
+    scope.finish();
+    setupSlot.release();
+    if (local.registry.get(id)) liveAuthWindow()?.webContents.send("aw:workspace-status", local_row(id));
+  }
+}
+
 /** Picking a local workspace that is not running yet starts it (same path as Finish setup). */
 async function window_startLocal(id: string): Promise<{ ok: boolean; error?: string }> {
   const ws = local.registry.get(id);
@@ -473,6 +506,22 @@ function registerIpcHandlers(): void {
       if (!ws || ws.sub !== currentSub()) return { ok: false, error: "unknown_workspace" };
       handOff();
       void startLocal(id, scope);
+      return { ok: true, data: null };
+    });
+  });
+
+  // Explicit, user-confirmed upgrade of one local workspace to the bundled core. Never runs on its own.
+  ipcMain.handle("aw:upgradeLocalWorkspace", async (_e, id: string): Promise<ApiResult<null>> => {
+    if (!currentToken) return { ok: false, error: "session_lost" };
+    return scopedExclusive<ApiResult<null>>(setupSlot, sessionScope, BUSY, async (scope, handOff) => {
+      const ws = local.registry.get(id);
+      if (!ws || ws.sub !== currentSub()) return { ok: false, error: "unknown_workspace" };
+      if (!upgradeAvailable(ws)) return { ok: false, error: "already_current", code: "already_current" };
+      const pre = await preflight();
+      if (!scope.isCurrent()) return { ok: false, error: "session_lost" };
+      if (!pre.ok) return { ok: false, error: pre.message, code: pre.code };
+      handOff();
+      void upgradeLocal(id, scope);
       return { ok: true, data: null };
     });
   });
