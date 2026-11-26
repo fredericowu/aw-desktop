@@ -7,6 +7,9 @@
 //  - bound to 127.0.0.1 only
 //  - Host must be 127.0.0.1:<uiPort> or localhost:<uiPort>  (421 otherwise): blocks DNS rebinding
 //  - WebSocket Origin must be exactly http://127.0.0.1:<uiPort> or http://localhost:<uiPort> (403 otherwise)
+//  - Container-app windows (Tier-2: kali, code-server, ...) are served on `<app>.app.localhost:<uiPort>`
+//    (strict label regex). Those Hosts proxy EVERY path, incl. WebSocket upgrades, to the core with the
+//    Host header preserved (the core routes on Host(<app>.app.<host>)); the WebSocket Origin must be the same app host
 //  - never injects or rewrites credentials: Cookie/Authorization pass through untouched
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
@@ -50,6 +53,9 @@ const MIME: Record<string, string> = {
 export const allowedHosts = (uiPort: number): string[] => [`127.0.0.1:${uiPort}`, `localhost:${uiPort}`];
 export const allowedOrigins = (uiPort: number): string[] => [`http://127.0.0.1:${uiPort}`, `http://localhost:${uiPort}`];
 
+/** `<app>.app.localhost:<uiPort>`: one DNS label for the app id, exact port, nothing else. */
+export const appHostRe = (uiPort: number): RegExp => new RegExp(`^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\\.app\\.localhost:${uiPort}$`);
+
 const isProxied = (path: string) => path === "/api" || path.startsWith("/api/") || path === "/ws" || path.startsWith("/ws/");
 
 function rawReject(socket: Socket, status: number, text: string): void {
@@ -89,7 +95,16 @@ export function createFrontServer(opts: FrontServerOptions): FrontServer {
   const origins = new Set(allowedOrigins(opts.uiPort));
   const upstreamHost = `127.0.0.1:${opts.apiPort}`;
 
-  const hostOk = (req: IncomingMessage) => hosts.has((req.headers.host ?? "").toLowerCase());
+  const appRe = appHostRe(opts.uiPort);
+  const hostOf = (req: IncomingMessage) => (req.headers.host ?? "").toLowerCase();
+  const isAppHost = (req: IncomingMessage) => appRe.test(hostOf(req));
+  const hostOk = (req: IncomingMessage) => hosts.has(hostOf(req)) || isAppHost(req);
+  const originOk = (req: IncomingMessage, origin: string) => {
+    const o = origin.toLowerCase();
+    if (origins.has(o)) return true;
+    // An app window's own page (same app host) may open WebSockets back to itself.
+    return isAppHost(req) && o === `http://${hostOf(req)}`;
+  };
 
   function serveStatic(req: IncomingMessage, res: ServerResponse, pathname: string): void {
     if (req.method !== "GET" && req.method !== "HEAD") return sendText(res, 405, "method not allowed");
@@ -112,9 +127,9 @@ export function createFrontServer(opts: FrontServerOptions): FrontServer {
     createReadStream(file).pipe(res);
   }
 
-  function proxyHttp(req: IncomingMessage, res: ServerResponse): void {
+  function proxyHttp(req: IncomingMessage, res: ServerResponse, keepHost = false): void {
     const up = httpRequest(
-      { host: "127.0.0.1", port: opts.apiPort, method: req.method, path: req.url, headers: { ...req.headers, host: upstreamHost } },
+      { host: "127.0.0.1", port: opts.apiPort, method: req.method, path: req.url, headers: { ...req.headers, host: keepHost ? hostOf(req) : upstreamHost } },
       (ur) => {
         res.writeHead(ur.statusCode ?? 502, ur.headers);
         ur.pipe(res);
@@ -130,6 +145,7 @@ export function createFrontServer(opts: FrontServerOptions): FrontServer {
   const server = createServer((req, res) => {
     if (!hostOk(req)) return sendText(res, 421, "misdirected request");
     const pathname = new URL(req.url ?? "/", "http://x").pathname;
+    if (isAppHost(req)) return proxyHttp(req, res, true);
     if (isProxied(pathname)) return proxyHttp(req, res);
     serveStatic(req, res, pathname);
   });
@@ -145,16 +161,17 @@ export function createFrontServer(opts: FrontServerOptions): FrontServer {
     socket.on("error", () => socket.destroy());
     if (!hostOk(req)) return rawReject(socket, 421, "Misdirected Request");
     const origin = req.headers.origin;
-    if (typeof origin !== "string" || !origins.has(origin.toLowerCase())) return rawReject(socket, 403, "Forbidden");
+    if (typeof origin !== "string" || !originOk(req, origin)) return rawReject(socket, 403, "Forbidden");
+    const appHost = isAppHost(req);
     const pathname = new URL(req.url ?? "/", "http://x").pathname;
-    if (!isProxied(pathname)) return rawReject(socket, 404, "Not Found");
+    if (!appHost && !isProxied(pathname)) return rawReject(socket, 404, "Not Found");
 
     const up = httpRequest({
       host: "127.0.0.1",
       port: opts.apiPort,
       method: req.method,
       path: req.url,
-      headers: { ...req.headers, host: upstreamHost },
+      headers: { ...req.headers, host: appHost ? hostOf(req) : upstreamHost },
     });
     up.on("upgrade", (ur, usock, uhead) => {
       let out = `HTTP/1.1 ${ur.statusCode} ${ur.statusMessage}\r\n`;
