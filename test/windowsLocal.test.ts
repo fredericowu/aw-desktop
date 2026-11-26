@@ -151,6 +151,10 @@ describe("windows start", () => {
     expect(seed).toContain("/home/user/aw/localaaa:/seed"); // the PARENT: copy is staged, then published by rename
     expect(seed!.join(" ")).toMatch(/cp -a .*workspace\.seeding.*mv \/seed\/workspace\.seeding \/seed\/workspace/);
     expect(seed).toContain("--pids-limit");
+    // rootless machine: the seed must run as root and chown to the image user, or the core cannot write its dirs
+    expect(seed![seed!.indexOf("--user") + 1]).toBe("0");
+    // ownership is finished BEFORE the publishing rename, so a failed chown leaves no tree the next start takes for seeded
+    expect(seed!.join(" ")).toMatch(/chown -R "\$own" \/seed\/workspace\.seeding \/seed\/home;.*mv \/seed\/workspace\.seeding \/seed\/workspace/);
   });
   it("does not re-seed a workspace dir that already has content", async () => {
     const h = winHarness((a) => (a.join(" ").includes("ls -A") ? ok("full\n") : undefined));

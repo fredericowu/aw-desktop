@@ -628,8 +628,11 @@ export class LocalRuntime {
           ["run", "--rm", "--pull=never", ...this.extraFlags, "--name", seed, "--security-opt", "label=disable",
             // Stage beside the workspace dir and publish by rename, so an interrupted copy never leaves a partial
             // tree that the next start would take for a seeded one.
-            "-v", `${posix.dirname(paths.workspace)}:/seed`, "--entrypoint", "sh", image, "-c",
-            `set -e; rm -rf /seed/workspace.seeding; cp -a ${CONTAINER_WORKDIR}/. /seed/workspace.seeding/; rm -rf /seed/workspace; mv /seed/workspace.seeding /seed/workspace`],
+            // Runs as root: the machine is rootless, so the dirs made over `machine ssh` belong to the machine user, which
+            // the image's own (non-root) user cannot write to. Root here maps to that machine user, so it can create the
+            // tree, and chown (before the publishing rename, so a failure leaves nothing that looks seeded) hands workspace + home to the image user's uid (read from the image, not hard-coded).
+            "-v", `${posix.dirname(paths.workspace)}:/seed`, "--user", "0", "--entrypoint", "sh", image, "-c",
+            `set -e; own=$(stat -c %u:%g ${CONTAINER_HOME} 2>/dev/null || echo 1001:1001); rm -rf /seed/workspace.seeding; cp -a ${CONTAINER_WORKDIR}/. /seed/workspace.seeding/; chown -R "$own" /seed/workspace.seeding /seed/home; rm -rf /seed/workspace; mv /seed/workspace.seeding /seed/workspace`],
           1_800_000,
         );
       } catch (err) {
