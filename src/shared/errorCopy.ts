@@ -5,7 +5,11 @@
  */
 import type { PreflightCode } from "./preflight";
 
-export type FailureCode = PreflightCode | "download_failed" | "start_failed";
+export type FailureCode = PreflightCode | "download_failed" | "start_failed" | "engine_unresponsive";
+
+/** Whose hardware the copy talks about. Mac copy is unchanged; Windows says "PC". */
+export type Host = "mac" | "pc";
+export const hostForPlatform = (platform: string): Host => (platform === "win32" ? "pc" : "mac");
 
 /** Detail that is safe to show: the code's plain copy only. Raw stderr goes to the diagnostics log. */
 export const FAILURE_COPY: Record<Exclude<FailureCode, "low_disk">, string> = {
@@ -13,6 +17,11 @@ export const FAILURE_COPY: Record<Exclude<FailureCode, "low_disk">, string> = {
   low_memory: "Not enough memory to start a local workspace.",
   engine_missing: "AW Desktop is incomplete. Reinstall it and try again.",
   path_too_long: "This Mac's account name is too long to run local workspaces.",
+  // Windows only. PO decision 3: the official feature name is allowed here (and only in prerequisite/recovery copy),
+  // because the user has to find it in Windows. Administrator access and a restart are named where they are needed.
+  wsl_missing: "Windows Subsystem for Linux (WSL) is not set up on this PC. It needs a one-time setup with administrator access and a restart.",
+  wsl_unresponsive: "Windows Subsystem for Linux (WSL) is not responding. Restart your PC, then try again.",
+  engine_unresponsive: "The workspace did not respond in time. If this keeps happening, restart your PC and try again.",
   download_failed: "Couldn't download the workspace. Check your connection and try again.",
   start_failed: "The workspace couldn't start. Retry, or copy details for support.",
 };
@@ -22,8 +31,17 @@ export function lowDiskCopy(gb?: number): string {
   return gb && gb > 0 ? `Not enough free disk space. Free up ${gb} GB and try again.` : "Not enough free disk space. Free up some space and try again.";
 }
 
-export function failureCopy(code: FailureCode, gb?: number): string {
-  return code === "low_disk" ? lowDiskCopy(gb) : FAILURE_COPY[code];
+/** Setup steps for a missing prerequisite (Windows). */
+export const WSL_SETUP_STEPS = [
+  "Open the Start menu, search for Command Prompt, right-click it and choose Run as administrator.",
+  "Run: wsl --install --no-distribution",
+  "Restart your PC, then open AW Desktop and choose Check again.",
+] as const;
+
+export function failureCopy(code: FailureCode, gb?: number, host: Host = "mac"): string {
+  if (code === "low_disk") return lowDiskCopy(gb);
+  const text = FAILURE_COPY[code];
+  return host === "pc" ? text.replace(/This Mac's account name/, "Your account name").replace(/This Mac/, "This PC") : text;
 }
 
 /** Progress copy: the six internal step ids collapse to two phases (ADR 0001). */

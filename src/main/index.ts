@@ -12,6 +12,7 @@ import { guardedOpen, persistSessionSafely } from "./safeOpen";
 import { preflight } from "./preflight";
 import { classifyError, looksLikeEngineText, type ClassifiedError } from "./errorClassifier";
 import { appendDiagnostic, readDiagnosticTail } from "./diagnostics";
+import { platformFor } from "./enginePlatform";
 import { PodmanCommandError, UpgradeFailedError, upgradeAvailable } from "./localRuntime";
 import { LocalWorkspaces, cachedIdentityPublicKey, identityPublicKey } from "./localWorkspaces";
 import { createBannerView } from "./bannerView";
@@ -29,6 +30,16 @@ import type { AccountInfo, ApiResult, AuthState, AwUser, BootstrapProgress, Work
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 }
+// Windows (and Linux) deliver an `awdesktop://` callback as argv of a SECOND instance, which exits at the lock above.
+// This is the first instance receiving it: oauth.ts hands the code to the waiting Google sign-in, and we bring the
+// window the user is looking for to the front.
+app.on("second-instance", () => {
+  const w = shellWindow && !shellWindow.isDestroyed() ? shellWindow : authWindow && !authWindow.isDestroyed() ? authWindow : null;
+  if (!w) return;
+  if (w.isMinimized()) w.restore();
+  w.show();
+  w.focus();
+});
 
 const REFRESH_INTERVAL_MS = 30 * 60 * 1000;
 
@@ -338,7 +349,7 @@ async function upgradeLocal(id: string, scope: SessionHandle): Promise<void> {
 async function window_startLocal(id: string): Promise<{ ok: boolean; error?: string }> {
   const ws = local.registry.get(id);
   if (!ws || ws.sub !== currentSub()) return { ok: false, error: "unknown_workspace" };
-  const r = await scopedExclusive<{ ok: boolean; error?: string }>(setupSlot, sessionScope, { ok: false, error: "A setup is already running on this Mac." }, async (scope, handOff) => {
+  const r = await scopedExclusive<{ ok: boolean; error?: string }>(setupSlot, sessionScope, { ok: false, error: `A setup is already running on ${process.platform === "win32" ? "this PC" : "this Mac"}.` }, async (scope, handOff) => {
     handOff();
     void startLocal(id, scope);
     return { ok: true };
@@ -469,7 +480,7 @@ function registerIpcHandlers(): void {
     return true;
   });
 
-  const BUSY = { ok: false, error: "A setup is already running on this Mac.", code: "bootstrap_running" } as const;
+  const BUSY = { ok: false, error: `A setup is already running on ${process.platform === "win32" ? "this PC" : "this Mac"}.`, code: "bootstrap_running" } as const;
 
   // Cap is enforced HERE (main process), per signed-in account, before anything is created.
   ipcMain.handle("aw:createLocalWorkspace", async (_e, name: string): Promise<ApiResult<WorkspaceInfo>> => {
@@ -516,6 +527,7 @@ function registerIpcHandlers(): void {
     return scopedExclusive<ApiResult<null>>(setupSlot, sessionScope, BUSY, async (scope, handOff) => {
       const ws = local.registry.get(id);
       if (!ws || ws.sub !== currentSub()) return { ok: false, error: "unknown_workspace" };
+      if (!platformFor().supportsUpgrade) return { ok: false, error: "upgrade_unsupported", code: "upgrade_unsupported" };
       if (!upgradeAvailable(ws)) return { ok: false, error: "already_current", code: "already_current" };
       const pre = await preflight();
       if (!scope.isCurrent()) return { ok: false, error: "session_lost" };

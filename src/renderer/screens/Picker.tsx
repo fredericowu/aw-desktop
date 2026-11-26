@@ -14,6 +14,11 @@ import {
   splitWorkspaces,
 } from "../../shared/workspaces";
 
+
+/** "this Mac" / "this PC": copy only, from the preload's host (absent in tests = Mac). */
+const thisDevice = (): string => (window.aw?.host === "pc" ? "this PC" : "this Mac");
+const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
+
 const CLOUD_UNAVAILABLE = "Feature is not available at this time.";
 
 type Load =
@@ -334,7 +339,7 @@ function WorkspaceRow({
     return (
       <div className="workspace-row" data-testid={`here-${ws.name}`}>
         {open}
-        <span className="dim">Runs on this Mac</span>
+        <span className="dim">Runs on {thisDevice()}</span>
         {upgrade}
         {remove}
       </div>
@@ -364,7 +369,7 @@ function WorkspaceRow({
   return (
     <div className="workspace-row pending" data-testid={`pending-${ws.name}`}>
       <span>{label}</span>
-      <span className="dim">Not running. Starts on this Mac.</span>
+      <span className="dim">Not running. Starts on {thisDevice()}.</span>
       <button className="primary" onClick={onFinish}>
         Start
       </button>
@@ -481,7 +486,7 @@ function RemoveModal({
       <div className="card modal">
         <strong>Remove “{name}”?</strong>
         <span className="dim">
-          This deletes the workspace “{name}” and all of its data from this Mac, including its database and files.
+          This deletes the workspace “{name}” and all of its data from {thisDevice()}, including its database and files.
           This cannot be undone.
         </span>
         {removal.error && (
@@ -534,6 +539,7 @@ function CreateWizard({
   onCreated: (ws: WorkspaceInfo, name: string) => void;
 }) {
   const [blocked, setBlocked] = useState<string | null>(null);
+  const [steps, setSteps] = useState<string[]>([]);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -542,7 +548,11 @@ function CreateWizard({
   const check = useCallback(() => {
     window.aw
       .preflight()
-      .then((r) => live.current && setBlocked(r.ok ? null : r.message ?? "This Mac can't run local workspaces."))
+      .then((r) => {
+        if (!live.current) return;
+        setBlocked(r.ok ? null : r.message ?? `${cap(thisDevice())} can't run local workspaces.`);
+        setSteps(r.ok ? [] : r.steps ?? []);
+      })
       .catch(() => undefined);
   }, []);
   useEffect(() => {
@@ -586,6 +596,13 @@ function CreateWizard({
           <span className="error" role="alert" data-testid="preflight-blocked">
             {blocked}
           </span>
+        )}
+        {blocked && steps.length > 0 && (
+          <ol className="dim" data-testid="preflight-steps">
+            {steps.map((t) => (
+              <li key={t}>{t}</li>
+            ))}
+          </ol>
         )}
         {blocked && (
           <button className="link" data-testid="preflight-recheck" onClick={check}>
