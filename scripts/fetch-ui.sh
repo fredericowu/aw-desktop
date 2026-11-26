@@ -40,6 +40,7 @@ rm -rf "$src/dist-desktop"
 # No secrets: only public identifiers.
 desk_commit="${GITHUB_SHA:-$(git -C "$root" rev-parse HEAD 2>/dev/null || echo unknown)}"
 tag=""; case "${GITHUB_REF:-}" in refs/tags/*) tag="${GITHUB_REF#refs/tags/}";; esac
-printf '{"desktopCommit":"%s","tag":"%s","uiCommit":"%s","workflowRunId":"%s"}\n' \
-  "$desk_commit" "$tag" "$ui_commit" "${GITHUB_RUN_ID:-}" > "$root/resources/build-info.json"
+core_image="$(sed -n 's/^IMAGE=//p' "$root/scripts/core-ref" 2>/dev/null | tr -d '[:space:]')"
+printf '{"desktopCommit":"%s","tag":"%s","uiCommit":"%s","coreImage":"%s","workflowRunId":"%s"}\n' \
+  "$desk_commit" "$tag" "$ui_commit" "$core_image" "${GITHUB_RUN_ID:-}" > "$root/resources/build-info.json"
 echo "fetch-ui: bundled UI at $out"

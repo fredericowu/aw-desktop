@@ -10,6 +10,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      allow_stale_pins:
+        description: "Release even if scripts/ui-ref or scripts/core-ref is behind upstream"
+        type: boolean
+        default: false
 
 concurrency:
   group: aw-desktop-release
@@ -57,6 +62,12 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Check UI and core pins are current
+        shell: bash
+        env:
+          ALLOW_STALE_PINS: ${{ inputs.allow_stale_pins == true || vars.ALLOW_STALE_PINS == 'true' }}
+        run: bash scripts/check-pins.sh
 
       - name: Bundle workspace UI
         # aw-workspace-ui is public; AW_UI_REPO_TOKEN is optional.
@@ -166,6 +177,12 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Check UI and core pins are current
+        shell: bash
+        env:
+          ALLOW_STALE_PINS: ${{ inputs.allow_stale_pins == true || vars.ALLOW_STALE_PINS == 'true' }}
+        run: bash scripts/check-pins.sh
 
       - name: Bundle workspace UI
         # aw-workspace-ui is public; AW_UI_REPO_TOKEN is optional.
