@@ -27,6 +27,8 @@ export interface PreflightProbe {
   hypervisorSupported(): Promise<boolean>;
   /** Windows: is WSL installed and answering within a deadline. "missing" = answered with a failure; "unresponsive" = hung. */
   wslState?(): Promise<"ready" | "missing" | "unresponsive">;
+  /** Windows: the system OpenSSH client (`machine ssh` needs it; the engine bundle ships none). */
+  sshAvailable?(): boolean;
 }
 
 const msg = (code: PreflightCode, gb?: number, host: Host = "mac"): PreflightResult => ({
@@ -65,6 +67,7 @@ async function runWindowsPreflight(p: PreflightProbe): Promise<PreflightResult> 
   if (p.freeDiskBytes < MIN_FREE_DISK_BYTES) {
     return msg("low_disk", Math.max(1, Math.ceil((MIN_FREE_DISK_BYTES - p.freeDiskBytes) / GIB)), host);
   }
+  if (p.sshAvailable && !p.sshAvailable()) return msg("ssh_missing", undefined, host);
   let state: "ready" | "missing" | "unresponsive" = "unresponsive";
   try {
     state = p.wslState ? await p.wslState() : "missing";

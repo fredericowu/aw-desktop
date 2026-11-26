@@ -6,7 +6,8 @@ export type PreflightCode =
   | "engine_missing"
   | "path_too_long"
   | "wsl_missing"
-  | "wsl_unresponsive";
+  | "wsl_unresponsive"
+  | "ssh_missing";
 
 export interface PreflightResult {
   ok: boolean;

@@ -289,13 +289,28 @@ const SUBNET_LAST = 250;
  * bridge, ours or not) and the subnets our other workspaces already hold. `seed` spreads the starting point. */
 export function pickSubnet(routeOutput: string, seed: string, held: ReadonlySet<string> = new Set()): string {
   const used = new Set<string>(held);
-  for (const m of routeOutput.matchAll(/\b10\.89\.(\d{1,3})\.\d{1,3}(?:\/\d+)?/g)) used.add(`10.89.${m[1]}.0/24`);
+  // Every destination in the table, with its real prefix length: a /17 covers many /24s, not just the first.
+  const routes: Array<[number, number]> = []; // [network, prefix length]
+  for (const m of routeOutput.matchAll(/^\s*(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\/(\d{1,2}))?/gm)) {
+    const ip = ((+m[1]! << 24) | (+m[2]! << 16) | (+m[3]! << 8) | +m[4]!) >>> 0;
+    routes.push([ip, m[5] === undefined ? 32 : +m[5]]);
+  }
+  const overlaps = (n: number): boolean => {
+    const cand = ((10 << 24) | (89 << 16) | (n << 8)) >>> 0;
+    return routes.some(([net, len]) => {
+      if (len === 0) return false; // the default route covers everything; it is not a taken subnet
+      const l = Math.min(len, 24); // two prefixes overlap iff they agree on the shorter one
+      const m2 = (~0 << (32 - l)) >>> 0;
+      return ((net & m2) >>> 0) === ((cand & m2) >>> 0);
+    });
+  };
   const span = SUBNET_LAST - SUBNET_FIRST + 1;
   let h = 0;
   for (const c of seed) h = (h * 31 + c.charCodeAt(0)) >>> 0;
   for (let i = 0; i < span; i++) {
-    const cand = `10.89.${SUBNET_FIRST + ((h + i) % span)}.0/24`;
-    if (!used.has(cand)) return cand;
+    const n = SUBNET_FIRST + ((h + i) % span);
+    const cand = `10.89.${n}.0/24`;
+    if (!used.has(cand) && !overlaps(n)) return cand;
   }
   throw new Error("no free 10.89.x.0/24 subnet left for the workspace network");
 }
@@ -603,7 +618,7 @@ export class LocalRuntime {
     if (this.plat.dataLayout === "distro") {
       // `podman cp` writes to a CLIENT-side path, which on Windows is not the distro's. A one-shot container
       // copies the image tree into the bind-mount source inside the distro instead.
-      const empty = await this.inDistro(id, `test -z "$(ls -A '${paths.workspace}')" && echo empty || echo full`);
+      const empty = await this.inDistro(id, `if [ -d '${paths.workspace}' ] && [ -n "$(ls -A '${paths.workspace}')" ]; then echo full; else echo empty; fi`);
       if (empty.stdout.trim() !== "empty") return false;
       const seed = `aw-${id}-seed`;
       await this.raw(id, ["--connection", machineName(id), "rm", "-f", seed]); // stale one from a killed attempt
@@ -611,7 +626,10 @@ export class LocalRuntime {
         await this.pm(
           id,
           ["run", "--rm", "--pull=never", ...this.extraFlags, "--name", seed, "--security-opt", "label=disable",
-            "-v", `${paths.workspace}:/seed`, "--entrypoint", "sh", image, "-c", `cp -a ${CONTAINER_WORKDIR}/. /seed/`],
+            // Stage beside the workspace dir and publish by rename, so an interrupted copy never leaves a partial
+            // tree that the next start would take for a seeded one.
+            "-v", `${posix.dirname(paths.workspace)}:/seed`, "--entrypoint", "sh", image, "-c",
+            `set -e; rm -rf /seed/workspace.seeding; cp -a ${CONTAINER_WORKDIR}/. /seed/workspace.seeding/; rm -rf /seed/workspace; mv /seed/workspace.seeding /seed/workspace`],
           1_800_000,
         );
       } catch (err) {

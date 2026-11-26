@@ -20,6 +20,7 @@ export const FAILURE_COPY: Record<Exclude<FailureCode, "low_disk">, string> = {
   // Windows only. PO decision 3: the official feature name is allowed here (and only in prerequisite/recovery copy),
   // because the user has to find it in Windows. Administrator access and a restart are named where they are needed.
   wsl_missing: "Windows Subsystem for Linux (WSL) is not set up on this PC. It needs a one-time setup with administrator access and a restart.",
+  ssh_missing: "The Windows OpenSSH Client is not installed. Add it under Settings, Apps, Optional features, then try again.",
   wsl_unresponsive: "Windows Subsystem for Linux (WSL) is not responding. Restart your PC, then try again.",
   engine_unresponsive: "The workspace did not respond in time. If this keeps happening, restart your PC and try again.",
   download_failed: "Couldn't download the workspace. Check your connection and try again.",

@@ -90,6 +90,12 @@ describe("shared network namespace", () => {
     expect(next).not.toBe(first);
     expect(pickSubnet("", "x", new Set([first]))).not.toBe(first);
   });
+  it("treats a route broader than /24 as covering every /24 inside it", () => {
+    const s = pickSubnet("10.89.128.0/17 dev eth0", "localaaa");
+    expect(Number(s.split(".")[2])).toBeLessThan(128);
+    expect(() => pickSubnet("10.89.0.0/16 dev eth0\ndefault via 1.1.1.1 dev eth0", "x")).toThrow(/no free/);
+    expect(pickSubnet("default via 1.1.1.1 dev eth0", "x")).toMatch(/^10\.89\./); // default route is not a taken subnet
+  });
   it("throws when the whole range is taken", () => {
     const all = Array.from({ length: 235 }, (_, i) => `10.89.${16 + i}.0/24 dev b${i}`).join("\n");
     expect(() => pickSubnet(all, "x")).toThrow(/no free/);
@@ -142,7 +148,8 @@ describe("windows start", () => {
     expect(h.calls.some((a) => a.includes("cp"))).toBe(false);
     const seed = h.calls.find((a) => a.includes("--rm") && a.includes("--entrypoint"));
     expect(seed).toBeDefined();
-    expect(seed).toContain("/home/user/aw/localaaa/workspace:/seed");
+    expect(seed).toContain("/home/user/aw/localaaa:/seed"); // the PARENT: copy is staged, then published by rename
+    expect(seed!.join(" ")).toMatch(/cp -a .*workspace\.seeding.*mv \/seed\/workspace\.seeding \/seed\/workspace/);
     expect(seed).toContain("--pids-limit");
   });
   it("does not re-seed a workspace dir that already has content", async () => {
@@ -272,6 +279,16 @@ describe("windows preflight", () => {
       const r = await runPreflight(good(over as Partial<PreflightProbe>));
       expect(r.message ?? "").not.toMatch(/\bMac\b/);
     }
+  });
+  it("a missing OpenSSH client is reported before WSL is probed", async () => {
+    let called = false;
+    const r = await runPreflight(good({ sshAvailable: () => false, wslState: async () => { called = true; return "ready"; } }));
+    expect(r.code).toBe("ssh_missing");
+    expect(called).toBe(false);
+    expect((await runPreflight(good({ sshAvailable: () => true }))).ok).toBe(true);
+  });
+  it("the engine PATH includes the system OpenSSH dir", () => {
+    expect(windowsPlatform.path("C:\\e", { SystemRoot: "C:\\Windows" })).toContain("C:\\Windows\\System32\\OpenSSH");
   });
   it("probes WSL last: a cheap failure never spawns wsl.exe", async () => {
     let called = false;

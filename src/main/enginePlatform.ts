@@ -90,7 +90,8 @@ export const windowsPlatform: EnginePlatform = {
   provider: () => "wsl",
   path: (binDir, host = process.env) => {
     const root = hostVar(host, "SystemRoot", "windir") ?? "C:\\Windows";
-    return [binDir, wjoin(root, "System32"), root, wjoin(root, "System32", "wbem")].join(";");
+    // podman's `machine ssh` launches `ssh` by name and the engine bundle ships none: the Windows OpenSSH client lives here.
+    return [binDir, wjoin(root, "System32"), root, wjoin(root, "System32", "wbem"), wjoin(root, "System32", "OpenSSH")].join(";");
   },
   // Short on purpose; C:\tmp (what "/tmp" resolves to) is not a per-user location.
   tmpRoot: (homesRoot) => wjoin(homesRoot, "t"),

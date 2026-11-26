@@ -47,7 +47,12 @@ async function realProbe(): Promise<PreflightProbe> {
     homesRoot: runtimeConfig("", home).homesRoot,
     engineRuns: await engineRuns(),
     hypervisorSupported: process.platform === "darwin" ? hvSupport : async () => true,
-    ...(process.platform === "win32" ? { wslState: () => wslState() } : {}),
+    ...(process.platform === "win32"
+      ? {
+          wslState: () => wslState(),
+          sshAvailable: () => existsSync(`${process.env["SystemRoot"] ?? process.env["windir"] ?? "C:\\Windows"}\\System32\\OpenSSH\\ssh.exe`),
+        }
+      : {}),
   };
 }
 

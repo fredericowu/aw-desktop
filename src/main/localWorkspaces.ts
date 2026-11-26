@@ -8,7 +8,7 @@ import { API_BASE } from "./config";
 import { createFrontServer, type FrontServer } from "./frontServer";
 import { fileStore, LocalRegistry, probeLoopbackPortBothFamilies, registryPath, type LocalWorkspace } from "./localRegistry";
 import { ensureWslConfig } from "./wslConfig";
-import { LocalRuntime, PortConflictError, upgradeAvailable, type RuntimeConfig } from "./localRuntime";
+import { LocalRuntime, PortConflictError, upgradeAvailable, type RuntimeConfig, type StartOptions } from "./localRuntime";
 import { platformFor, type EnginePlatform } from "./enginePlatform";
 import type { BootstrapStepId, WorkspaceInfo } from "../shared/types";
 import { LOCAL_PLACEMENT } from "../shared/workspaces";
@@ -149,7 +149,14 @@ export class LocalWorkspaces {
       if (!live()) return;
       const authPublicKey = await hooks.authKey();
       if (!live()) return;
-      await this.runtime.start(ws, { authPublicKey, recover: true });
+      const moved = await this.startWithPortRetry(id, { authPublicKey, recover: true });
+      // The saved port was taken meanwhile and the workspace moved: the front server still proxies to the old one.
+      if (this.running.has(id) && (moved.apiPort !== ws.apiPort || moved.uiPort !== ws.uiPort)) {
+        await this.fronts.get(id)?.close();
+        const front = createFrontServer({ uiPort: moved.uiPort, apiPort: moved.apiPort, staticDir: uiStaticDir() });
+        await front.listen();
+        this.fronts.set(id, front);
+      }
     });
   }
 
@@ -222,27 +229,30 @@ export class LocalWorkspaces {
     }, avoid);
   }
 
-  /** Bring the machine, containers and front server up. Returns the (possibly port-bumped) record. */
-  async start(id: string, authPublicKey: string, onStep: (s: BootstrapStepId) => void): Promise<LocalWorkspace> {
-    // Retry after "needs attention": the core may still be running but hung, so use recovery rules.
-    const recover = this.needsAttention(id);
-    // A host port can be held inside another WSL distro without the Windows-side probe seeing it: when the
-    // engine says so, mark the port busy, let reconcile pick another one, and try again (bounded).
-    if (platformFor().id === "win32") {
-      ensureWslConfig(homedir(), { read: (p) => (existsSync(p) ? readFileSync(p, "utf8") : null), write: (p, d) => writeFileSync(p, d) });
-    }
+  /** reconcile + runtime.start, retrying on a port the engine reports busy (bounded). Shared by a normal start and
+   * automatic recovery, so a port taken while the VM was down is replaced instead of retried forever. */
+  private async startWithPortRetry(id: string, opts: StartOptions): Promise<LocalWorkspace> {
     const avoid = new Set<number>();
-    let workspace: LocalWorkspace;
     for (let attempt = 0; ; attempt++) {
-      workspace = (await this.reconcile(id, avoid)).workspace;
+      const { workspace } = await this.reconcile(id, avoid);
       try {
-        await this.runtime.start(workspace, { authPublicKey, recover, onStep: (s) => onStep(stepFor(s)) });
-        break;
+        await this.runtime.start(workspace, opts);
+        return workspace;
       } catch (err) {
         if (!(err instanceof PortConflictError) || attempt >= 4) throw err;
         avoid.add(err.port);
       }
     }
+  }
+
+  /** Bring the machine, containers and front server up. Returns the (possibly port-bumped) record. */
+  async start(id: string, authPublicKey: string, onStep: (s: BootstrapStepId) => void): Promise<LocalWorkspace> {
+    // Retry after "needs attention": the core may still be running but hung, so use recovery rules.
+    const recover = this.needsAttention(id);
+    if (platformFor().id === "win32") {
+      ensureWslConfig(homedir(), { read: (p) => (existsSync(p) ? readFileSync(p, "utf8") : null), write: (p, d) => writeFileSync(p, d) });
+    }
+    const workspace = await this.startWithPortRetry(id, { authPublicKey, recover, onStep: (s) => onStep(stepFor(s)) });
     await this.fronts.get(id)?.close();
     const front = createFrontServer({ uiPort: workspace.uiPort, apiPort: workspace.apiPort, staticDir: uiStaticDir() });
     await front.listen();
