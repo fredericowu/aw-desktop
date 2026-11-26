@@ -80,6 +80,9 @@ export interface UpgradeOptions {
   onCommit?: (image: string) => void;
 }
 
+/** wsl.exe's generic failure code, returned when it cannot start a command in a distro that is up a moment later. */
+const TRANSIENT_WSL = /exit status 0xffffffff/i;
+const SSH_ATTEMPTS = 4;
 const CONTAINER_WORKDIR = "/opt/aw-workspace";
 const CONTAINER_HOME = "/home/ubuntu";
 const CONTAINER_SOCK = "/run/podman.sock";
@@ -469,7 +472,24 @@ export class LocalRuntime {
   }
   /** A shell script inside the workspace's machine (`machine ssh`). Throws on non-zero. */
   private inDistro(id: string, script: string, timeoutMs = 60_000): Promise<RunResult> {
-    return this.machineCmd(id, ["machine", "ssh", machineName(id), script], timeoutMs);
+    return this.machineSsh(id, script, timeoutMs);
+  }
+  /** `machine ssh` with a bounded retry on wsl.exe's transient "exit status 0xffffffff" (seen on the Surface right after a
+   * heavy image pull with the VM under memory pressure: the distro and socket were fine seconds later). Every script run
+   * through here is idempotent, so repeating one is safe; any other failure is thrown on the first attempt. */
+  private async machineSsh(id: string, script: string, timeoutMs = 120_000): Promise<RunResult> {
+    // One budget for all attempts plus backoff, so a flaky wsl.exe cannot stretch the call to several timeouts.
+    const deadline = this.clock() + timeoutMs;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.machineCmd(id, ["machine", "ssh", machineName(id), script], Math.max(1, deadline - this.clock()));
+      } catch (err) {
+        const transient = err instanceof PodmanCommandError && TRANSIENT_WSL.test(`${err.result.stderr}\n${err.result.stdout}`);
+        const backoff = 2000 * attempt;
+        if (!transient || attempt >= SSH_ATTEMPTS || this.clock() + backoff >= deadline) throw err;
+        await this.sleep(backoff);
+      }
+    }
   }
 
   /** HTTP status of the core's health URL on `apiPort` (0 when it does not answer). */
@@ -551,7 +571,7 @@ export class LocalRuntime {
   /** Podman API socket path INSIDE the VM; the machine name is a parameter, never podman-machine-default. */
   async vmSocketPath(id: string): Promise<string> {
     const script = 'sock="/run/user/$(id -u)/podman/podman.sock"; test -S "$sock" && printf %s "$sock"';
-    const r = await this.machineCmd(id, ["machine", "ssh", machineName(id), script]);
+    const r = await this.machineSsh(id, script);
     const sock = r.stdout.trim();
     if (!sock) throw new Error(`podman socket not found inside machine ${machineName(id)}`);
     return sock;

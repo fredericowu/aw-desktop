@@ -109,13 +109,15 @@ describe("shared network namespace", () => {
 
 function winHarness(handler: (args: string[]) => RunResult | undefined) {
   const calls: string[][] = [];
+  const timeouts: Array<number | undefined> = [];
   const dirs: string[] = [];
   const fs: FsOps = { mkdirp: (p) => void dirs.push(p), writeFile() {}, readFile: () => null, isEmptyDir: () => true, rename() {}, listDir: () => [], exists: () => false, rmrf() {} };
   let t = 0;
   const rt = new LocalRuntime(win, {
     fs, sleep: async () => void (t += 1000), now: () => t, newSecret: () => "pw", httpStatus: async () => 200,
-    run: async (_c, args) => {
+    run: async (_c, args, o) => {
       calls.push(args);
+      timeouts.push(o?.timeoutMs);
       const c = handler(args);
       if (c) return c;
       const j = args.join(" ");
@@ -130,7 +132,7 @@ function winHarness(handler: (args: string[]) => RunResult | undefined) {
       return ok();
     },
   });
-  return { rt, calls, dirs };
+  return { rt, calls, dirs, timeouts };
 }
 
 describe("windows start", () => {
@@ -180,6 +182,34 @@ describe("windows start", () => {
     expect(err).toBeInstanceOf(PortConflictError);
     expect(err.port).toBe(9032);
     expect(h.calls.some((a) => a.includes("rm") && a.includes("aw-localaaa-workspace"))).toBe(true);
+  });
+  const WSL_FLAKE = { code: 125, stdout: "", stderr: "Error: command C:\\Windows\\System32\\wsl.exe [-u root -d podman-aw-localaaa sh] failed: exit status 0xffffffff ()" };
+  const isSockProbe = (a: string[]) => a[0] === "machine" && a[1] === "ssh" && a.join(" ").includes("podman.sock");
+  it("retries the socket probe when wsl.exe fails transiently (0xffffffff) instead of failing Create", async () => {
+    let n = 0;
+    const h = winHarness((a) => (isSockProbe(a) && n++ < 2 ? WSL_FLAKE : undefined));
+    await h.rt.start(mkWs("localaaa"));
+    expect(h.calls.filter(isSockProbe)).toHaveLength(3); // 2 transient failures, then the real answer
+  });
+  it("gives up after a bounded number of transient failures and reports the real error", async () => {
+    const h = winHarness((a) => (isSockProbe(a) ? WSL_FLAKE : undefined));
+    const err = await h.rt.start(mkWs("localaaa")).catch((e) => e);
+    expect(err).toBeInstanceOf(PodmanCommandError);
+    expect(h.calls.filter(isSockProbe)).toHaveLength(4);
+  });
+  it("shares one timeout budget across the retries instead of a fresh one per attempt", async () => {
+    const h = winHarness((a) => (isSockProbe(a) ? WSL_FLAKE : undefined));
+    await h.rt.start(mkWs("localaaa")).catch(() => {});
+    const probes = h.calls.map((a, i) => (isSockProbe(a) ? h.timeouts[i]! : -1)).filter((x) => x >= 0);
+    expect(probes.length).toBeGreaterThan(1);
+    expect(probes[0]).toBeLessThanOrEqual(120_000);
+    for (let i = 1; i < probes.length; i++) expect(probes[i]).toBeLessThan(probes[i - 1]);
+  });
+  it("does not retry a machine ssh failure that is not the transient wsl one", async () => {
+    const h = winHarness((a) => (isSockProbe(a) ? { code: 125, stdout: "", stderr: "Error: no such machine" } : undefined));
+    const err = await h.rt.start(mkWs("localaaa")).catch((e) => e);
+    expect(err).toBeInstanceOf(PodmanCommandError);
+    expect(h.calls.filter(isSockProbe)).toHaveLength(1);
   });
   it("another failure of the same step is NOT a port conflict", async () => {
     const h = winHarness((a) => (a.includes("run") && a.includes("--init") ? { code: 125, stdout: "", stderr: "image not known" } : undefined));
