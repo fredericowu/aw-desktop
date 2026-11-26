@@ -181,6 +181,26 @@ describe("windows start", () => {
     expect(err.port).toBe(9032);
     expect(h.calls.some((a) => a.includes("rm") && a.includes("aw-localaaa-workspace"))).toBe(true);
   });
+  const WSL_FLAKE = { code: 125, stdout: "", stderr: "Error: command C:\\Windows\\System32\\wsl.exe [-u root -d podman-aw-localaaa sh] failed: exit status 0xffffffff ()" };
+  const isSockProbe = (a: string[]) => a[0] === "machine" && a[1] === "ssh" && a.join(" ").includes("podman.sock");
+  it("retries the socket probe when wsl.exe fails transiently (0xffffffff) instead of failing Create", async () => {
+    let n = 0;
+    const h = winHarness((a) => (isSockProbe(a) && n++ < 2 ? WSL_FLAKE : undefined));
+    await h.rt.start(mkWs("localaaa"));
+    expect(h.calls.filter(isSockProbe)).toHaveLength(3); // 2 transient failures, then the real answer
+  });
+  it("gives up after a bounded number of transient failures and reports the real error", async () => {
+    const h = winHarness((a) => (isSockProbe(a) ? WSL_FLAKE : undefined));
+    const err = await h.rt.start(mkWs("localaaa")).catch((e) => e);
+    expect(err).toBeInstanceOf(PodmanCommandError);
+    expect(h.calls.filter(isSockProbe)).toHaveLength(4);
+  });
+  it("does not retry a machine ssh failure that is not the transient wsl one", async () => {
+    const h = winHarness((a) => (isSockProbe(a) ? { code: 125, stdout: "", stderr: "Error: no such machine" } : undefined));
+    const err = await h.rt.start(mkWs("localaaa")).catch((e) => e);
+    expect(err).toBeInstanceOf(PodmanCommandError);
+    expect(h.calls.filter(isSockProbe)).toHaveLength(1);
+  });
   it("another failure of the same step is NOT a port conflict", async () => {
     const h = winHarness((a) => (a.includes("run") && a.includes("--init") ? { code: 125, stdout: "", stderr: "image not known" } : undefined));
     const err = await h.rt.start(mkWs("localaaa")).catch((e) => e);
