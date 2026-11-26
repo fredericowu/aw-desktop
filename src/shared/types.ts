@@ -86,6 +86,8 @@ export interface SessionResult {
  * the renderer never talks to aw-backend directly (see SKILL note on the
  * SameSite cookie gotcha: a renderer-origin fetch silently drops it). */
 export interface AwBridge {
+  /** Which kind of computer this is, for copy only ("this Mac" / "this PC"). Absent = mac. */
+  host?: "mac" | "pc";
   getState(): Promise<AuthState>;
   login(email: string, password: string): Promise<SessionResult>;
   signup(email: string, password: string): Promise<SessionResult>;

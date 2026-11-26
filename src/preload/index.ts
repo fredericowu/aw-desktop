@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 import type { AwBridge, AuthState, BootstrapProgress, WorkspaceInfo } from "../shared/types";
 
 const bridge: AwBridge = {
+  host: process.platform === "win32" ? "pc" : "mac",
   getState: () => ipcRenderer.invoke("aw:getState"),
   login: (email, password) => ipcRenderer.invoke("aw:login", email, password),
   signup: (email, password) => ipcRenderer.invoke("aw:signup", email, password),

@@ -28,6 +28,16 @@ export interface EnginePlatform {
   env(i: { home: string; tmp: string; path: string; provider: string; helperDir: string }, host?: HostEnv): Record<string, string>;
   /** `podman machine init` flags after the machine name. `dataDir` is shared into the VM where supported. */
   machineInitFlags(dataDir: string, sizing: MachineSizing): string[];
+  /** Where workspace data lives. "host": bind-mounted from the host filesystem (macOS, virtiofs).
+   * "distro": on the machine's own ext4, created through `machine ssh` (Windows: /mnt/c binds are ~9x slower,
+   * ignore chown and are case-insensitive, W0 Q5). */
+  readonly dataLayout: "host" | "distro";
+  /** Root of the per-workspace data inside the distro when dataLayout is "distro". [W0] the WSL machine user is `user`. */
+  readonly distroDataRoot: string;
+  /** Extra flags for every `run`/`create` of a workspace container. */
+  containerFlags(): string[];
+  /** Whether the in-place core upgrade is available (Windows v1 defers it, PO decision 1). */
+  readonly supportsUpgrade: boolean;
   /** Applied when a caller gave no timeout. 0 = none. */
   readonly defaultTimeoutMs: number;
   /** Kill the whole process tree of a timed-out engine call (wsl.exe and proxy helpers outlive podman.exe). */
@@ -55,6 +65,10 @@ export const darwinPlatform: EnginePlatform = {
     // not cover the data dir. Share it explicitly (virtiofs, same path in the VM).
     "--volume", `${dataDir}:${dataDir}`,
   ],
+  dataLayout: "host",
+  distroDataRoot: "",
+  containerFlags: () => [],
+  supportsUpgrade: true,
   defaultTimeoutMs: 0,
   treeKill: false,
 };
@@ -76,13 +90,15 @@ export const windowsPlatform: EnginePlatform = {
   provider: () => "wsl",
   path: (binDir, host = process.env) => {
     const root = hostVar(host, "SystemRoot", "windir") ?? "C:\\Windows";
-    return [binDir, wjoin(root, "System32"), root, wjoin(root, "System32", "wbem")].join(";");
+    // podman's `machine ssh` launches `ssh` by name and the engine bundle ships none: the Windows OpenSSH client lives here.
+    return [binDir, wjoin(root, "System32"), root, wjoin(root, "System32", "wbem"), wjoin(root, "System32", "OpenSSH")].join(";");
   },
   // Short on purpose; C:\tmp (what "/tmp" resolves to) is not a per-user location.
   tmpRoot: (homesRoot) => wjoin(homesRoot, "t"),
   env: (i, host = process.env) => {
     const out: Record<string, string> = {
-      // [W0 a] a per-workspace USERPROFILE is assumed to isolate podman's machine config; unverified.
+      // [W0-unverified] a per-workspace USERPROFILE isolates podman's machine config and connections. W0 ran both
+      // machines under the REAL profile (distinct names), so the override itself was never exercised.
       USERPROFILE: i.home,
       HOME: i.home,
       APPDATA: wjoin(i.home, "AppData", "Roaming"),
@@ -100,8 +116,14 @@ export const windowsPlatform: EnginePlatform = {
     }
     return out;
   },
-  // [W0 d] the WSL provider is assumed to take no sizing flags and no virtiofs share; unverified.
+  // W0 Q4: --cpus/--memory/--disk-size are accepted but NOT enforced under WSL (all distros share one VM sized by
+  // .wslconfig; see wslConfig.ts), so none are passed. [W0-unverified] dropping the default C:\\ 9p mount via --volume.
   machineInitFlags: () => [],
+  dataLayout: "distro",
+  distroDataRoot: "/home/user/aw",
+  // W0 Q2: rootless crun fails on every container with "controller 'pids' is not available" under WSL.
+  containerFlags: () => ["--pids-limit", "0"],
+  supportsUpgrade: false,
   // WSL can hang rather than fail (observed on the Surface): every engine call needs a ceiling.
   defaultTimeoutMs: 120_000,
   treeKill: true,

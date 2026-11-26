@@ -61,6 +61,18 @@ export const probeLoopbackPort: PortProbe = (port) =>
     srv.listen(port, "127.0.0.1", () => srv.close(() => resolve(true)));
   });
 
+/** Windows: WSL publishes a container port on Windows loopback through wslrelay, on [::1] for a plain -p and on 127.0.0.1
+ * for an explicit IPv4 publish (W0 Q2), so a port can be taken on one family only. Free means free on both; a host
+ * without IPv6 loopback has nothing to collide on there. */
+export const probeLoopbackPortBothFamilies: PortProbe = async (port) => {
+  if (!(await probeLoopbackPort(port))) return false;
+  return new Promise<boolean>((resolve) => {
+    const srv = createServer();
+    srv.once("error", (e: NodeJS.ErrnoException) => resolve(e.code === "EADDRNOTAVAIL" || e.code === "EAFNOSUPPORT"));
+    srv.listen(port, "::1", () => srv.close(() => resolve(true)));
+  });
+};
+
 /** Next free port >= from, skipping 9030, `taken`, and anything the probe says is busy. */
 export async function findFreePort(
   isFree: PortProbe,
@@ -266,6 +278,8 @@ export class LocalRegistry {
   async reconcilePorts(
     id: string,
     heldByUs: (port: number) => boolean = () => false,
+    /** Ports known to be busy even though the Windows-side probe says free (held inside another WSL distro). */
+    avoid: ReadonlySet<number> = new Set(),
   ): Promise<{ workspace: LocalWorkspace; uiChanged: boolean; apiChanged: boolean }> {
     // Probes are async: after them, re-read and revalidate the selection against the latest
     // reservations (a concurrent reconcile may have persisted the same port); retry on conflict.
@@ -280,10 +294,10 @@ export class LocalRegistry {
       };
       const others = othersOf(f.workspaces);
       const ok = async (p: number, extra: number[]) =>
-        p !== RESERVED_PORT && !others.has(p) && !extra.includes(p) && (heldByUs(p) || (await this.isPortFree(p)));
+        p !== RESERVED_PORT && !others.has(p) && !avoid.has(p) && !extra.includes(p) && (heldByUs(p) || (await this.isPortFree(p)));
       let { uiPort, apiPort } = cur;
-      if (!(await ok(uiPort, []))) uiPort = await findFreePort(this.isPortFree, new Set([...others, apiPort]));
-      if (!(await ok(apiPort, [uiPort]))) apiPort = await findFreePort(this.isPortFree, new Set([...others, uiPort]), uiPort + 1);
+      if (!(await ok(uiPort, []))) uiPort = await findFreePort(this.isPortFree, new Set([...others, ...avoid, apiPort]));
+      if (!(await ok(apiPort, [uiPort]))) apiPort = await findFreePort(this.isPortFree, new Set([...others, ...avoid, uiPort]), uiPort + 1);
       const workspace = { ...cur, uiPort, apiPort };
       const changed = uiPort !== cur.uiPort || apiPort !== cur.apiPort;
       if (changed) {

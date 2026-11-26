@@ -1,5 +1,6 @@
 import { app, shell } from "electron";
 import { API_BASE, NATIVE_CLIENT_SLUG, PROTOCOL_SCHEME } from "./config";
+import { extractCode, findProtocolUrl } from "./oauthCore";
 
 /** Google SSO via the system browser + the existing native_oauth_handoff.py
  * custom-scheme flow (card 4175bf3b-9510-8104-8c21-f5008b4d708b §2). Google
@@ -23,20 +24,20 @@ export function registerProtocolHandler(): void {
   // macOS delivers the custom-scheme open as this event, not argv.
   app.on("open-url", (event, url) => {
     event.preventDefault();
-    const code = extractCode(url);
-    if (pendingResolve) {
-      pendingResolve(code);
-      pendingResolve = null;
-    }
+    deliver(url);
+  });
+  // Windows/Linux: the OS starts a second instance with the URL in argv; the single-instance lock forwards it here.
+  app.on("second-instance", (_event, argv) => {
+    const url = findProtocolUrl(argv, PROTOCOL_SCHEME);
+    if (url) deliver(url);
   });
 }
 
-function extractCode(url: string): string | null {
-  try {
-    const parsed = new URL(url);
-    return parsed.searchParams.get("code");
-  } catch {
-    return null;
+function deliver(url: string): void {
+  const code = extractCode(url);
+  if (pendingResolve) {
+    pendingResolve(code);
+    pendingResolve = null;
   }
 }
 

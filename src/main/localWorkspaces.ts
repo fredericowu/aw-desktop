@@ -6,8 +6,9 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { API_BASE } from "./config";
 import { createFrontServer, type FrontServer } from "./frontServer";
-import { fileStore, LocalRegistry, registryPath, type LocalWorkspace } from "./localRegistry";
-import { LocalRuntime, upgradeAvailable, type RuntimeConfig } from "./localRuntime";
+import { fileStore, LocalRegistry, probeLoopbackPortBothFamilies, registryPath, type LocalWorkspace } from "./localRegistry";
+import { ensureWslConfig } from "./wslConfig";
+import { LocalRuntime, PortConflictError, upgradeAvailable, type RuntimeConfig, type StartOptions } from "./localRuntime";
 import { platformFor, type EnginePlatform } from "./enginePlatform";
 import type { BootstrapStepId, WorkspaceInfo } from "../shared/types";
 import { LOCAL_PLACEMENT } from "../shared/workspaces";
@@ -38,13 +39,14 @@ export function stepFor(runtimeStep: string): BootstrapStepId {
 }
 
 /** The renderer-facing row for a registry record (`name` is the registry id, the slug `pickWorkspace` takes). */
-export function toWorkspaceInfo(ws: LocalWorkspace, running: boolean, supervised: SupervisedStatus | null = null): WorkspaceInfo {
+export function toWorkspaceInfo(ws: LocalWorkspace, running: boolean, supervised: SupervisedStatus | null = null, platform: EnginePlatform = platformFor()): WorkspaceInfo {
   const base = {
     name: ws.id,
     display_name: ws.name,
     placement_driver: LOCAL_PLACEMENT,
     is_hosted: false,
-    ...(upgradeAvailable(ws) ? { upgrade_available: true } : {}),
+    // Windows v1 defers the in-place upgrade (PO decision 1): never offer an action that cannot run.
+    ...(platform.supportsUpgrade && upgradeAvailable(ws) ? { upgrade_available: true } : {}),
   };
   if (running && supervised === "starting") return { ...base, status: "starting", detail: SUPERVISOR_COPY.starting };
   if (running && supervised === "needs_attention") return { ...base, status: "needs_attention", detail: SUPERVISOR_COPY.needs_attention };
@@ -99,6 +101,7 @@ export class LocalWorkspaces {
     const userData = app.getPath("userData");
     this.registry = new LocalRegistry({
       store: fileStore(registryPath(userData)),
+      ...(platformFor().id === "win32" ? { isPortFree: probeLoopbackPortBothFamilies } : {}),
       fetchMaxLocal: async () => {
         const t = getToken();
         return t ? fetchMaxLocal(t) : undefined;
@@ -146,7 +149,14 @@ export class LocalWorkspaces {
       if (!live()) return;
       const authPublicKey = await hooks.authKey();
       if (!live()) return;
-      await this.runtime.start(ws, { authPublicKey, recover: true });
+      const moved = await this.startWithPortRetry(id, { authPublicKey, recover: true });
+      // The saved port was taken meanwhile and the workspace moved: the front server still proxies to the old one.
+      if (this.running.has(id) && (moved.apiPort !== ws.apiPort || moved.uiPort !== ws.uiPort)) {
+        await this.fronts.get(id)?.close();
+        const front = createFrontServer({ uiPort: moved.uiPort, apiPort: moved.apiPort, staticDir: uiStaticDir() });
+        await front.listen();
+        this.fronts.set(id, front);
+      }
     });
   }
 
@@ -208,7 +218,7 @@ export class LocalWorkspaces {
     return this.registry.listFor(sub).map((w) => toWorkspaceInfo(w, this.running.has(w.id), this.supervisor.status(w.id)));
   }
 
-  private reconcile(id: string) {
+  private reconcile(id: string, avoid: ReadonlySet<number> = new Set()) {
     return this.registry.reconcilePorts(id, (p) => {
       // Our own front server (UI port) or running container (API port) is not a conflict.
       const cur = this.registry.get(id);
@@ -216,15 +226,33 @@ export class LocalWorkspaces {
       const front = this.fronts.get(id);
       if (p === cur.uiPort) return !!front && front.server.listening;
       return p === cur.apiPort && this.running.has(id);
-    });
+    }, avoid);
+  }
+
+  /** reconcile + runtime.start, retrying on a port the engine reports busy (bounded). Shared by a normal start and
+   * automatic recovery, so a port taken while the VM was down is replaced instead of retried forever. */
+  private async startWithPortRetry(id: string, opts: StartOptions): Promise<LocalWorkspace> {
+    const avoid = new Set<number>();
+    for (let attempt = 0; ; attempt++) {
+      const { workspace } = await this.reconcile(id, avoid);
+      try {
+        await this.runtime.start(workspace, opts);
+        return workspace;
+      } catch (err) {
+        if (!(err instanceof PortConflictError) || attempt >= 4) throw err;
+        avoid.add(err.port);
+      }
+    }
   }
 
   /** Bring the machine, containers and front server up. Returns the (possibly port-bumped) record. */
   async start(id: string, authPublicKey: string, onStep: (s: BootstrapStepId) => void): Promise<LocalWorkspace> {
-    const { workspace } = await this.reconcile(id);
     // Retry after "needs attention": the core may still be running but hung, so use recovery rules.
     const recover = this.needsAttention(id);
-    await this.runtime.start(workspace, { authPublicKey, recover, onStep: (s) => onStep(stepFor(s)) });
+    if (platformFor().id === "win32") {
+      ensureWslConfig(homedir(), { read: (p) => (existsSync(p) ? readFileSync(p, "utf8") : null), write: (p, d) => writeFileSync(p, d) });
+    }
+    const workspace = await this.startWithPortRetry(id, { authPublicKey, recover, onStep: (s) => onStep(stepFor(s)) });
     await this.fronts.get(id)?.close();
     const front = createFrontServer({ uiPort: workspace.uiPort, apiPort: workspace.apiPort, staticDir: uiStaticDir() });
     await front.listen();

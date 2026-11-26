@@ -15,7 +15,7 @@ import { darwinPlatform, type EnginePlatform } from "./enginePlatform";
 import { get as httpGet } from "node:http";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, isAbsolute } from "node:path";
+import { dirname, join, posix, relative, isAbsolute } from "node:path";
 import type { LocalWorkspace } from "./localRegistry";
 
 /** Pinned public tag (v0.165.0: ui_changed push + app_revs, required for live menu updates). Not `latest`: the bundled UI must match the core. */
@@ -106,6 +106,19 @@ export class PodmanCommandError extends Error {
     this.name = "PodmanCommandError";
   }
 }
+
+/** A published host port is already taken (all WSL distros share ONE network namespace, W0 Q3, so a port held by
+ * another distro or by aw-ubuntu is invisible to the Windows-side probe). The caller bumps the port and retries. */
+export class PortConflictError extends Error {
+  constructor(
+    public readonly port: number,
+    public readonly cause: unknown,
+  ) {
+    super(`host port ${port} is already in use`);
+    this.name = "PortConflictError";
+  }
+}
+const PORT_IN_USE = /address already in use|port is already allocated|bind: address/i;
 
 type ExecFileFn = typeof execFile;
 const killTreeWin = (pid: number) => {
@@ -244,18 +257,62 @@ export interface WorkspacePaths {
   passwordFile: string;
 }
 
+/** Per-workspace data root INSIDE the distro (dataLayout "distro" only). */
+export const distroRoot = (plat: EnginePlatform, id: string): string => posix.join(plat.distroDataRoot, id);
+
 export function workspacePaths(cfg: RuntimeConfig, id: string): WorkspacePaths {
+  const plat = cfg.platform ?? darwinPlatform;
   const data = join(cfg.dataRoot, id);
+  // `data` and the password file stay on the host (the password must be readable without the VM running).
+  // On a "distro" layout the four bind-mount sources are POSIX paths inside the machine, not host paths.
+  const inDistro = plat.dataLayout === "distro";
+  const droot = distroRoot(plat, id);
   return {
     home: join(cfg.homesRoot, id, "home"),
-    tmp: join(cfg.tmpRoot ?? (cfg.platform ?? darwinPlatform).tmpRoot(cfg.homesRoot), `aw-${id}`),
+    tmp: join(cfg.tmpRoot ?? plat.tmpRoot(cfg.homesRoot), `aw-${id}`),
     data,
-    workspace: join(data, "workspace"),
-    homeData: join(data, "home"),
-    postgres: join(data, "postgres"),
-    redis: join(data, "redis"),
+    workspace: inDistro ? posix.join(droot, "workspace") : join(data, "workspace"),
+    homeData: inDistro ? posix.join(droot, "home") : join(data, "home"),
+    postgres: inDistro ? posix.join(droot, "postgres") : join(data, "postgres"),
+    redis: inDistro ? posix.join(droot, "redis") : join(data, "redis"),
     passwordFile: join(data, "postgres-password"),
   };
+}
+
+/** Linux interface names are capped at 15 bytes; the shared netns (W0 Q3) means two distros' bridges would
+ * otherwise both be called podman1. */
+export const bridgeName = (id: string): string => `aw${id}`.slice(0, 15);
+
+const SUBNET_FIRST = 16; // 10.89.0.0/24 is the default podman1 bridge (W0 Q3); stay clear of the low range
+const SUBNET_LAST = 250;
+/** First free 10.89.N.0/24 given the machine's `ip -4 route` output (which, in the shared netns, lists every distro's
+ * bridge, ours or not) and the subnets our other workspaces already hold. `seed` spreads the starting point. */
+export function pickSubnet(routeOutput: string, seed: string, held: ReadonlySet<string> = new Set()): string {
+  const used = new Set<string>(held);
+  // Every destination in the table, with its real prefix length: a /17 covers many /24s, not just the first.
+  const routes: Array<[number, number]> = []; // [network, prefix length]
+  for (const m of routeOutput.matchAll(/^\s*(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\/(\d{1,2}))?/gm)) {
+    const ip = ((+m[1]! << 24) | (+m[2]! << 16) | (+m[3]! << 8) | +m[4]!) >>> 0;
+    routes.push([ip, m[5] === undefined ? 32 : +m[5]]);
+  }
+  const overlaps = (n: number): boolean => {
+    const cand = ((10 << 24) | (89 << 16) | (n << 8)) >>> 0;
+    return routes.some(([net, len]) => {
+      if (len === 0) return false; // the default route covers everything; it is not a taken subnet
+      const l = Math.min(len, 24); // two prefixes overlap iff they agree on the shorter one
+      const m2 = (~0 << (32 - l)) >>> 0;
+      return ((net & m2) >>> 0) === ((cand & m2) >>> 0);
+    });
+  };
+  const span = SUBNET_LAST - SUBNET_FIRST + 1;
+  let h = 0;
+  for (const c of seed) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  for (let i = 0; i < span; i++) {
+    const n = SUBNET_FIRST + ((h + i) % span);
+    const cand = `10.89.${n}.0/24`;
+    if (!used.has(cand) && !overlaps(n)) return cand;
+  }
+  throw new Error("no free 10.89.x.0/24 subnet left for the workspace network");
 }
 
 export function machineProvider(arch: string = process.arch): string {
@@ -294,20 +351,20 @@ export function machineInitArgs(cfg: RuntimeConfig, id: string): string[] {
   ];
 }
 
-export function postgresRunArgs(id: string, password: string, dataDir: string): string[] {
+export function postgresRunArgs(id: string, password: string, dataDir: string, extra: string[] = []): string[] {
   const n = containerNames(id);
   return [
-    "run", "-d", "--name", n.postgres, "--network", networkName(id),
+    "run", "-d", ...extra, "--name", n.postgres, "--network", networkName(id),
     "-e", `POSTGRES_PASSWORD=${password}`,
     "-v", `${dataDir}:/var/lib/postgresql/data`,
     POSTGRES_IMAGE,
   ];
 }
 
-export function redisRunArgs(id: string, dataDir: string): string[] {
+export function redisRunArgs(id: string, dataDir: string, extra: string[] = []): string[] {
   const n = containerNames(id);
   return [
-    "run", "-d", "--name", n.redis, "--network", networkName(id),
+    "run", "-d", ...extra, "--name", n.redis, "--network", networkName(id),
     "-v", `${dataDir}:/data`,
     REDIS_IMAGE, "redis-server", "--appendonly", "yes",
   ];
@@ -321,6 +378,8 @@ export interface WorkspaceRunInput {
   image: string;
   workers: number;
   authPublicKey?: string;
+  /** Platform container flags (EnginePlatform.containerFlags), e.g. --pids-limit 0 on Windows. */
+  extraFlags?: string[];
 }
 
 export function workspaceEnvVars(i: WorkspaceRunInput): string[] {
@@ -347,7 +406,7 @@ export function workspaceEnvVars(i: WorkspaceRunInput): string[] {
 export function workspaceRunArgs(i: WorkspaceRunInput): string[] {
   const n = containerNames(i.ws.id);
   const args = [
-    "run", "-d", "--pull=never", "--name", n.workspace, "--network", networkName(i.ws.id),
+    "run", "-d", "--pull=never", ...(i.extraFlags ?? []), "--name", n.workspace, "--network", networkName(i.ws.id),
     "--restart=always", "--init", "--ulimit", "core=0",
     // Loopback only, never 0.0.0.0.
     "-p", `127.0.0.1:${i.ws.apiPort}:${CORE_PORT}`,
@@ -402,6 +461,17 @@ export class LocalRuntime {
     this.clock = deps.now ?? Date.now;
   }
 
+  private get plat(): EnginePlatform {
+    return this.cfg.platform ?? darwinPlatform;
+  }
+  private get extraFlags(): string[] {
+    return this.plat.containerFlags();
+  }
+  /** A shell script inside the workspace's machine (`machine ssh`). Throws on non-zero. */
+  private inDistro(id: string, script: string, timeoutMs = 60_000): Promise<RunResult> {
+    return this.machineCmd(id, ["machine", "ssh", machineName(id), script], timeoutMs);
+  }
+
   /** HTTP status of the core's health URL on `apiPort` (0 when it does not answer). */
   healthStatus(apiPort: number): Promise<number> {
     return this.status(`http://127.0.0.1:${apiPort}/api/health`);
@@ -435,7 +505,9 @@ export class LocalRuntime {
   /** Create the isolated HOME/TMPDIR/data dirs and the per-HOME containers.conf. Idempotent. */
   prepare(id: string): WorkspacePaths {
     const p = workspacePaths(this.cfg, id);
-    for (const d of [p.home, p.tmp, p.data, p.workspace, p.homeData, p.postgres, p.redis]) this.fs.mkdirp(d);
+    // On a "distro" layout the four data dirs are paths inside the machine: ensureDistroDirs creates them once it is up.
+    const hostDirs = this.plat.dataLayout === "distro" ? [p.home, p.tmp, p.data] : [p.home, p.tmp, p.data, p.workspace, p.homeData, p.postgres, p.redis];
+    for (const d of hostDirs) this.fs.mkdirp(d);
     const confDir = join(p.home, ".config", "containers");
     this.fs.mkdirp(confDir);
     this.fs.writeFile(join(confDir, "containers.conf"), containersConf(this.cfg));
@@ -485,6 +557,13 @@ export class LocalRuntime {
     return sock;
   }
 
+  /** Create the in-distro data dirs (no-op on a host layout). Idempotent; needs the machine running. */
+  private async ensureDistroDirs(id: string, paths: WorkspacePaths): Promise<void> {
+    if (this.plat.dataLayout !== "distro") return;
+    const q = (d: string) => `'${d}'`; // paths are built from [a-z0-9] ids and constant roots, never user text
+    await this.inDistro(id, `mkdir -p ${[paths.workspace, paths.homeData, paths.postgres, paths.redis].map(q).join(" ")}`);
+  }
+
   private async password(paths: WorkspacePaths): Promise<string> {
     const cur = this.fs.readFile(paths.passwordFile)?.trim();
     if (cur) return cur;
@@ -494,9 +573,17 @@ export class LocalRuntime {
   }
 
   private async ensureNetwork(id: string): Promise<void> {
-    if (!(await this.exists(id, ["network", "exists", networkName(id)]))) {
+    if (await this.exists(id, ["network", "exists", networkName(id)])) return;
+    if (this.plat.dataLayout !== "distro") {
       await this.pm(id, ["network", "create", networkName(id)]);
+      return;
     }
+    // Every distro shares one network namespace (W0 Q3): an auto-picked subnet and bridge name would be the
+    // same in each workspace and collide. Pick a subnet nobody in the namespace holds, and a unique bridge name.
+    // [W0-unverified] `network create --subnet/--interface-name` was never run on the Surface.
+    const routes = await this.inDistro(id, "ip -4 route");
+    const subnet = pickSubnet(routes.stdout, id);
+    await this.pm(id, ["network", "create", "--subnet", subnet, "--interface-name", bridgeName(id), networkName(id)]);
   }
   private async pullIfMissing(id: string, image: string): Promise<void> {
     if (!(await this.exists(id, ["image", "exists", image]))) await this.pm(id, ["pull", image], 1_800_000);
@@ -528,6 +615,29 @@ export class LocalRuntime {
   }
 
   async seedWorkspaceDir(id: string, image: string, paths: WorkspacePaths): Promise<boolean> {
+    if (this.plat.dataLayout === "distro") {
+      // `podman cp` writes to a CLIENT-side path, which on Windows is not the distro's. A one-shot container
+      // copies the image tree into the bind-mount source inside the distro instead.
+      const empty = await this.inDistro(id, `if [ -d '${paths.workspace}' ] && [ -n "$(ls -A '${paths.workspace}')" ]; then echo full; else echo empty; fi`);
+      if (empty.stdout.trim() !== "empty") return false;
+      const seed = `aw-${id}-seed`;
+      await this.raw(id, ["--connection", machineName(id), "rm", "-f", seed]); // stale one from a killed attempt
+      try {
+        await this.pm(
+          id,
+          ["run", "--rm", "--pull=never", ...this.extraFlags, "--name", seed, "--security-opt", "label=disable",
+            // Stage beside the workspace dir and publish by rename, so an interrupted copy never leaves a partial
+            // tree that the next start would take for a seeded one.
+            "-v", `${posix.dirname(paths.workspace)}:/seed`, "--entrypoint", "sh", image, "-c",
+            `set -e; rm -rf /seed/workspace.seeding; cp -a ${CONTAINER_WORKDIR}/. /seed/workspace.seeding/; rm -rf /seed/workspace; mv /seed/workspace.seeding /seed/workspace`],
+          1_800_000,
+        );
+      } catch (err) {
+        await this.raw(id, ["--connection", machineName(id), "rm", "-f", seed]);
+        throw err;
+      }
+      return true;
+    }
     if (!this.fs.isEmptyDir(paths.workspace)) return false;
     const seed = `aw-${id}-seed`;
     await this.pm(id, ["create", "--pull=never", "--name", seed, image]);
@@ -550,7 +660,7 @@ export class LocalRuntime {
     const password = await this.password(paths);
 
     step("postgres");
-    await this.ensureContainer(id, names.postgres, postgresRunArgs(id, password, paths.postgres));
+    await this.ensureContainer(id, names.postgres, postgresRunArgs(id, password, paths.postgres, this.extraFlags));
     await this.waitFor(
       "postgres",
       async () => (await this.raw(id, ["--connection", machineName(id), "exec", names.postgres, "psql", "-h", "127.0.0.1", "-U", "postgres", "-c", "select 1"])).code === 0,
@@ -565,7 +675,7 @@ export class LocalRuntime {
     await this.pm(id, ["exec", names.postgres, "psql", "-h", "127.0.0.1", "-U", "postgres", "-d", "aw_workspace", "-c", "CREATE EXTENSION IF NOT EXISTS vector;"]);
 
     step("redis");
-    await this.ensureContainer(id, names.redis, redisRunArgs(id, paths.redis));
+    await this.ensureContainer(id, names.redis, redisRunArgs(id, paths.redis, this.extraFlags));
     return password;
   }
 
@@ -590,6 +700,7 @@ export class LocalRuntime {
       running = false;
     }
     if (!running) await this.machineStart(id);
+    await this.ensureDistroDirs(id, paths);
 
     const password = await this.ensureBackends(id, paths, [POSTGRES_IMAGE, REDIS_IMAGE, image], step);
     // An upgrade that was interrupted (app quit, crash, power loss) is rolled back before anything else touches the core.
@@ -606,6 +717,7 @@ export class LocalRuntime {
       image,
       workers: this.cfg.workers ?? 2,
       authPublicKey: opts.authPublicKey,
+      extraFlags: this.extraFlags,
     };
     const url = `http://127.0.0.1:${ws.apiPort}/api/health`;
     const wasRunning = opts.recover ? await this.containerRunning(id, names.workspace) : false;
@@ -621,15 +733,24 @@ export class LocalRuntime {
   /** Recreate when the published API port changed (publish is fixed at creation; data is on bind mounts). */
   private async ensureWorkspaceContainer(id: string, input: WorkspaceRunInput): Promise<void> {
     const name = containerNames(id).workspace;
-    if (await this.exists(id, ["container", "exists", name])) {
-      const ports = await this.pm(id, ["inspect", name, "--format", "{{json .HostConfig.PortBindings}}"]);
-      if (!ports.stdout.includes(`"HostPort":"${input.ws.apiPort}"`)) {
-        await this.pm(id, ["rm", "-f", name]);
-        await this.pm(id, workspaceRunArgs(input));
-        return;
+    try {
+      if (await this.exists(id, ["container", "exists", name])) {
+        const ports = await this.pm(id, ["inspect", name, "--format", "{{json .HostConfig.PortBindings}}"]);
+        if (!ports.stdout.includes(`"HostPort":"${input.ws.apiPort}"`)) {
+          await this.pm(id, ["rm", "-f", name]);
+          await this.pm(id, workspaceRunArgs(input));
+          return;
+        }
       }
+      await this.ensureContainer(id, name, workspaceRunArgs(input));
+    } catch (err) {
+      if (err instanceof PodmanCommandError && PORT_IN_USE.test(`${err.result.stderr}\n${err.result.stdout}`)) {
+        // The creation never completed, so nothing is half-started under this name.
+        await this.raw(id, ["--connection", machineName(id), "rm", "-f", name]);
+        throw new PortConflictError(input.ws.apiPort, err);
+      }
+      throw err;
     }
-    await this.ensureContainer(id, name, workspaceRunArgs(input));
   }
 
   // ---- in-place core upgrade ----
@@ -669,6 +790,7 @@ export class LocalRuntime {
    * bootstrap-workspace --force or unlink, and never removes the VM, postgres or redis.
    */
   async upgrade(ws: LocalWorkspace, opts: UpgradeOptions = {}): Promise<{ upgraded: boolean }> {
+    if (!this.plat.supportsUpgrade) throw new UpgradeFailedError(new Error("in-place upgrade is not available on this platform"), true);
     const id = ws.id;
     const step = opts.onStep ?? (() => undefined);
     const target = opts.targetImage ?? WORKSPACE_IMAGE;
