@@ -477,14 +477,17 @@ export class LocalRuntime {
   /** `machine ssh` with a bounded retry on wsl.exe's transient "exit status 0xffffffff" (seen on the Surface right after a
    * heavy image pull with the VM under memory pressure: the distro and socket were fine seconds later). Every script run
    * through here is idempotent, so repeating one is safe; any other failure is thrown on the first attempt. */
-  private async machineSsh(id: string, script: string, timeoutMs?: number): Promise<RunResult> {
+  private async machineSsh(id: string, script: string, timeoutMs = 120_000): Promise<RunResult> {
+    // One budget for all attempts plus backoff, so a flaky wsl.exe cannot stretch the call to several timeouts.
+    const deadline = this.clock() + timeoutMs;
     for (let attempt = 1; ; attempt++) {
       try {
-        return await this.machineCmd(id, ["machine", "ssh", machineName(id), script], timeoutMs);
+        return await this.machineCmd(id, ["machine", "ssh", machineName(id), script], Math.max(1, deadline - this.clock()));
       } catch (err) {
         const transient = err instanceof PodmanCommandError && TRANSIENT_WSL.test(`${err.result.stderr}\n${err.result.stdout}`);
-        if (!transient || attempt >= SSH_ATTEMPTS) throw err;
-        await this.sleep(2000 * attempt);
+        const backoff = 2000 * attempt;
+        if (!transient || attempt >= SSH_ATTEMPTS || this.clock() + backoff >= deadline) throw err;
+        await this.sleep(backoff);
       }
     }
   }
