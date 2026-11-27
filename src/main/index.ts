@@ -7,7 +7,7 @@ import { loadToken, saveToken, clearToken } from "./authStore";
 import { injectIdentityCookie, clearIdentityCookie, injectLocalIdentityCookie, clearLocalIdentityCookies } from "./cookie";
 import { registerProtocolHandler, startGoogleSignInHandoff } from "./oauth";
 import { createAuthWindow, createShellWindow } from "./windows";
-import { checkForUpdates, installPendingUpdate, UPDATE_RECHECK_MS } from "./updater";
+import { checkForUpdates, installPendingUpdate, UPDATE_RECHECK_MS, INSTALL_QUIT_GRACE_MS } from "./updater";
 import { guardedOpen, persistSessionSafely } from "./safeOpen";
 import { preflight } from "./preflight";
 import { classifyError, looksLikeEngineText, type ClassifiedError } from "./errorClassifier";
@@ -649,8 +649,11 @@ app.on("before-quit", (event) => {
   // Local workspaces only run while the app runs: stop their machines, then really quit.
   // app.exit() skips electron-updater's install-on-quit hook, so install a downloaded update explicitly.
   void local.stopAll().finally(async () => {
-    if (await installPendingUpdate().catch(() => false)) return;
-    app.exit(0);
+    // quitAndInstall can fail silently (no event on a failed Squirrel/installer hand-off): never
+    // leave the app running with its workspaces stopped.
+    const installing = await installPendingUpdate().catch(() => false);
+    if (installing) setTimeout(() => app.exit(0), INSTALL_QUIT_GRACE_MS).unref();
+    else app.exit(0);
   });
 });
 

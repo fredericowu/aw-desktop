@@ -18,9 +18,10 @@ describe("core pin", () => {
   it("fetch-ui records the core image in build-info and the release gate runs before it", () => {
     expect(read("scripts/fetch-ui.sh")).toContain("coreImage");
     const wf = read(".github/workflows/release.yml");
-    expect(wf.split("scripts/check-pins.sh").length - 1).toBe(2);
-    expect(wf.indexOf("scripts/check-pins.sh")).toBeLessThan(wf.indexOf("scripts/fetch-ui.sh"));
-    expect(wf.lastIndexOf("scripts/check-pins.sh")).toBeLessThan(wf.lastIndexOf("scripts/fetch-ui.sh"));
+    // One shared job, so both platforms act on the same decision and nothing is published before it.
+    expect(wf.split("scripts/check-pins.sh").length - 1).toBe(1);
+    expect(wf).toMatch(/release-macos:\n    needs: check-pins/);
+    expect(wf).toContain("needs: [check-pins, release-macos]");
   });
 });
 

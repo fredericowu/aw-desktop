@@ -2,11 +2,11 @@ import { app } from "electron";
 import { appendDiagnostic } from "./diagnostics";
 import { join } from "node:path";
 
+/** How long quitAndInstall gets to take the app down before we exit ourselves. */
+export const INSTALL_QUIT_GRACE_MS = 15_000;
 export const UPDATE_RECHECK_MS = 4 * 60 * 60 * 1000;
 
 let updateDownloaded: string | null = null;
-/** Version of a downloaded update waiting for a restart, or null. */
-export const pendingUpdate = (): string | null => updateDownloaded;
 
 const logFile = (): string => join(app.getPath("userData"), "diagnostics.log");
 function record(code: string, raw: string): void {
