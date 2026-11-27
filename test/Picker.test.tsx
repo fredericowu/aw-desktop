@@ -32,6 +32,7 @@ function bridge(over: Partial<AwBridge> & { workspaces?: WorkspaceInfo[]; localC
     pickWorkspace: vi.fn(async () => ({ ok: true })),
     finishLocalSetup: vi.fn(async () => ({ ok: true, data: null })),
     removeLocalWorkspace: vi.fn(async () => ({ ok: true, data: null })),
+    stopLocalWorkspace: vi.fn(async () => ({ ok: true, data: null })),
     upgradeLocalWorkspace: vi.fn(async (): Promise<ApiResult<null>> => ({ ok: true, data: null })),
     getBootstrapProgress: vi.fn(async (): Promise<BootstrapProgress | null> => null),
     takePendingUpgrade: vi.fn(async (): Promise<string | null> => null),
@@ -100,6 +101,24 @@ describe("Picker landing", () => {
     expect(row.textContent).toContain("Runs on this Mac");
     fireEvent.click(row.querySelector("button")!);
     expect(b.pickWorkspace).toHaveBeenCalledWith("local1a2b");
+  });
+
+  it("a running local row offers Stop for that workspace only; a failed stop shows the reason", async () => {
+    const b = bridge({
+      workspaces: [
+        ws({ name: "localaa", display_name: "A", status: "running" }),
+        ws({ name: "localbb", display_name: "B", status: "running" }),
+      ],
+    });
+    render(<Picker state={state} />);
+    await screen.findByTestId("here-localaa");
+    fireEvent.click(screen.getByTestId("stop-localbb"));
+    await waitFor(() => expect(b.stopLocalWorkspace).toHaveBeenCalledWith("localbb"));
+    expect(b.stopLocalWorkspace).toHaveBeenCalledTimes(1);
+    expect(b.removeLocalWorkspace).not.toHaveBeenCalled();
+    b.stopLocalWorkspace.mockImplementation(async () => ({ ok: false, error: "A setup is already running on this Mac." }));
+    fireEvent.click(screen.getByTestId("stop-localaa"));
+    expect((await screen.findByTestId("local-notice")).textContent).toContain("already running");
   });
 
   it("supervisor states: starting shows plain copy, needs attention offers Retry through the normal start path", async () => {
