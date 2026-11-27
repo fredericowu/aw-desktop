@@ -27,7 +27,7 @@
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",
     "@vitejs/plugin-react": "^4.7.0",
-    "electron": "^33.4.11",
+    "electron": "^42.11.18",
     "electron-builder": "^25.1.8",
     "electron-vite": "^6.0.0",
     "jsdom": "^25.0.1",
@@ -39,7 +39,7 @@
     "vitest": "^2.1.9"
   },
   "allowScripts": {
-    "electron@33.4.11": true,
+    "electron@42.11.18": true,
     "esbuild@0.25.12": true
   }
 }
