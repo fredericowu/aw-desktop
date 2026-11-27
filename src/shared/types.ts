@@ -109,6 +109,7 @@ export interface AwBridge {
   removeLocalWorkspace(slug: string): Promise<ApiResult<null>>;
   getBootstrapProgress(): Promise<BootstrapProgress | null>;
   /** Settings > About asked to upgrade `slug`: open the confirm modal (nothing runs until the user confirms). Optional for older test bridges. */
+  takePendingUpgrade?(): Promise<string | null>;
   onUpgradeRequested?(cb: (slug: string) => void): () => void;
   onBootstrapProgress(cb: (p: BootstrapProgress) => void): () => void;
   /** Recent diagnostics text for support, copied to the clipboard by main. Resolves false if there is nothing to copy. */

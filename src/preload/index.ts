@@ -32,6 +32,7 @@ const bridge: AwBridge = {
     ipcRenderer.on("aw:request-upgrade", listener);
     return () => ipcRenderer.removeListener("aw:request-upgrade", listener);
   },
+  takePendingUpgrade: (): Promise<string | null> => ipcRenderer.invoke("aw:takePendingUpgrade"),
   copyDiagnostics: () => ipcRenderer.invoke("aw:copyDiagnostics"),
   logout: () => ipcRenderer.invoke("aw:logout"),
   onStateChanged: (cb: (state: AuthState) => void) => {

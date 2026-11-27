@@ -14,7 +14,7 @@ import { classifyError, looksLikeEngineText, type ClassifiedError } from "./erro
 import { appendDiagnostic, readDiagnosticTail } from "./diagnostics";
 import { platformFor } from "./enginePlatform";
 import { PodmanCommandError, UpgradeFailedError, WORKSPACE_IMAGE, pinnedImage, upgradeAvailable } from "./localRuntime";
-import { WINDOWS_VM, hostFacts, parseMachineInspect, VM_DEFAULTS, type VmFacts } from "./aboutFacts";
+import { WINDOWS_VM, hostFacts, vmFactsFromInspect, type VmFacts } from "./aboutFacts";
 import { readFileSync } from "node:fs";
 import { LocalWorkspaces, cachedIdentityPublicKey, identityPublicKey } from "./localWorkspaces";
 import { createBannerView } from "./bannerView";
@@ -67,6 +67,8 @@ let shellLocalPort: number | null = null;
 /** Account key for the per-account cap: the identity user id. */
 const currentSub = (): string => String(state.user?.id ?? "");
 
+/** Workspace id whose About-initiated upgrade dialog the Picker has not yet claimed. */
+let pendingUpgrade: string | null = null;
 let state: AuthState = { stage: "splash", user: null, error: null, apex: APEX, openError: null, storageWarning: null };
 
 /** macOS keeps the app alive after the picker window is closed, leaving
@@ -378,7 +380,7 @@ function desktopBridge(id: string) {
       const supported = platformFor().supportsUpgrade;
       let vm: VmFacts = { state: "unknown", reason: "no workspace record" };
       if (supported) {
-        vm = await local.runtime.machineInspect(id).then(parseMachineInspect, () => ({ state: "ok", ...VM_DEFAULTS, source: "default" }) as VmFacts);
+        vm = await vmFactsFromInspect(local.runtime.machineInspect(id));
       } else {
         vm = WINDOWS_VM;
       }
@@ -398,10 +400,16 @@ function desktopBridge(id: string) {
       if (!platformFor().supportsUpgrade) return { status: 409, body: { error: "upgrade_unsupported" } };
       if (!upgradeAvailable(ws)) return { status: 409, body: { error: "already_current" } };
       if (setupSlot.isBusy) return { status: 409, body: { error: "busy" } };
-      if (!authWindow || authWindow.isDestroyed()) authWindow = createAuthWindow();
-      authWindow.show();
-      authWindow.focus();
-      authWindow.webContents.send("aw:request-upgrade", id);
+      // The Picker may not be mounted (workspace open leaves "loading-workspace", a closed window is recreated):
+      // park the request in main, move to the Picker, and let it claim the request once it has mounted.
+      const alive = liveAuthWindow();
+      const pickerLive = !!alive && state.stage === "picker" && !alive.webContents.isLoading();
+      pendingUpgrade = id;
+      if (!alive) authWindow = createAuthWindow();
+      if (state.stage !== "picker") setState({ stage: "picker", user: state.user, error: null, openError: null });
+      authWindow!.show();
+      authWindow!.focus();
+      if (pickerLive) authWindow!.webContents.send("aw:request-upgrade", id);
       return { status: 202, body: { ok: true } };
     },
   };
@@ -436,6 +444,11 @@ function startLocalSupervisor(): void {
 
 function registerIpcHandlers(): void {
   ipcMain.handle("aw:getState", () => state);
+  ipcMain.handle("aw:takePendingUpgrade", () => {
+    const id = pendingUpgrade;
+    pendingUpgrade = null;
+    return id;
+  });
   ipcMain.on("aw:banner-retry", (e) => {
     // Only the banner view itself may trigger it, never the hosted workspace page.
     if (bannerContentsId !== null && bannerContentsId === e.sender.id) void recoveryBanner?.retry();

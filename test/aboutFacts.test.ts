@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseMachineInspect, parseSystemProfilerGpu } from "../src/main/aboutFacts";
+import { vmFactsFromInspect, parseMachineInspect, parseSystemProfilerGpu } from "../src/main/aboutFacts";
 
 describe("aboutFacts", () => {
   it("reads VM Resources from podman machine inspect", () => {
@@ -11,6 +11,9 @@ describe("aboutFacts", () => {
   });
   it("unparseable inspect is unknown, not defaults", () => {
     expect(parseMachineInspect("nope").state).toBe("unknown");
+  });
+  it("a rejected inspect is unknown, not the init defaults", async () => {
+    expect(await vmFactsFromInspect(Promise.reject(new Error("timeout")))).toMatchObject({ state: "unknown" });
   });
   it("Apple GPU shares system memory and prints no VRAM", () => {
     const out = parseSystemProfilerGpu(JSON.stringify({ SPDisplaysDataType: [{ sppci_model: "Apple M2", sppci_cores: "10" }] }));

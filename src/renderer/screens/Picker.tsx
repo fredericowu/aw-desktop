@@ -53,7 +53,10 @@ export function Picker({ state }: { state: AuthState }) {
   }, []);
   // Settings > About asks for an upgrade: only OPEN the existing confirm modal (it runs nothing by itself).
   const [upgradeRequest, setUpgradeRequest] = useState<string | null>(null);
-  useEffect(() => window.aw.onUpgradeRequested?.(setUpgradeRequest), []);
+  useEffect(() => {
+    void window.aw.takePendingUpgrade?.().then((id) => id && setUpgradeRequest(id));
+    return window.aw.onUpgradeRequested?.(setUpgradeRequest);
+  }, []);
   useEffect(() => {
     if (!upgradeRequest || load.phase !== "ready") return;
     const target = load.workspaces.find((w) => w.name === upgradeRequest && w.upgrade_available);

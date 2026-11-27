@@ -34,6 +34,7 @@ function bridge(over: Partial<AwBridge> & { workspaces?: WorkspaceInfo[]; localC
     removeLocalWorkspace: vi.fn(async () => ({ ok: true, data: null })),
     upgradeLocalWorkspace: vi.fn(async (): Promise<ApiResult<null>> => ({ ok: true, data: null })),
     getBootstrapProgress: vi.fn(async (): Promise<BootstrapProgress | null> => null),
+    takePendingUpgrade: vi.fn(async (): Promise<string | null> => null),
     onUpgradeRequested: vi.fn((cb: (slug: string) => void) => ((emitUpgradeRequest = cb), () => undefined)),
     onBootstrapProgress: vi.fn((cb: (p: BootstrapProgress) => void) => {
       emitProgress = cb;
@@ -494,6 +495,13 @@ describe("Upgrade local workspace", () => {
     await screen.findByTestId("upgrade-localaaa");
     emitUpgradeRequest("localbbb"); // current workspace: ignored
     emitUpgradeRequest("localaaa");
+    await screen.findByTestId("upgrade-modal");
+    expect(b.upgradeLocalWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("claims an upgrade request parked in main before the Picker mounted", async () => {
+    const b = bridge({ workspaces: [old()], takePendingUpgrade: vi.fn(async () => "localaaa") });
+    render(<Picker state={state} />);
     await screen.findByTestId("upgrade-modal");
     expect(b.upgradeLocalWorkspace).not.toHaveBeenCalled();
   });

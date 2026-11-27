@@ -91,4 +91,9 @@ export async function hostFacts(dataRoot: string): Promise<HostFacts> {
 }
 
 /** Windows: one shared WSL2 VM, not sized per workspace. */
+/** A failed/timed-out inspect establishes nothing about the VM's sizing: unknown, never the init defaults. */
+export function vmFactsFromInspect(inspect: Promise<string>): Promise<VmFacts> {
+  return inspect.then(parseMachineInspect, (): VmFacts => ({ state: "unknown", reason: "podman machine inspect failed" }));
+}
+
 export const WINDOWS_VM: VmFacts = { state: "unavailable", reason: "shared WSL2 VM, not sized per workspace" };
