@@ -10,6 +10,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      allow_stale_pins:
+        description: "Release even if scripts/ui-ref or scripts/core-ref is behind upstream"
+        type: boolean
+        default: false
 
 concurrency:
   group: aw-desktop-release
@@ -22,7 +27,20 @@ permissions:
   contents: write
 
 jobs:
+  # One freshness decision for both platforms, taken before either publishes anything: a check inside
+  # each job could pass on macOS and fail on Windows after the release already holds the mac assets.
+  check-pins:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check UI and core pins are current
+        env:
+          ALLOW_STALE_PINS: ${{ inputs.allow_stale_pins == true || vars.ALLOW_STALE_PINS == 'true' }}
+        run: bash scripts/check-pins.sh
+
   release-macos:
+    needs: check-pins
     runs-on: macos-15
     timeout-minutes: 40
     env:
@@ -152,7 +170,7 @@ jobs:
     # GitHub Release for this tag — electron-builder's GitHub publisher
     # creates the release on first publish, then reuses it on subsequent
     # ones; running both at once risks two concurrent "create" attempts.
-    needs: release-macos
+    needs: [check-pins, release-macos]
     runs-on: windows-latest
     timeout-minutes: 40
     env:

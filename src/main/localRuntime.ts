@@ -19,7 +19,7 @@ import { dirname, join, posix, relative, isAbsolute } from "node:path";
 import type { LocalWorkspace } from "./localRegistry";
 
 /** Pinned public tag (v0.165.0: ui_changed push + app_revs, required for live menu updates). Not `latest`: the bundled UI must match the core. */
-export const WORKSPACE_IMAGE = "ghcr.io/fredericowu/aw-workspace:v0.165.0";
+export const WORKSPACE_IMAGE = "ghcr.io/fredericowu/aw-workspace:v0.167.0";
 /** Image every workspace created before per-workspace pinning was seeded from. */
 export const LEGACY_WORKSPACE_IMAGE = "ghcr.io/fredericowu/aw-workspace:v0.158.0";
 // Same pinned digests as aw-remote-host bootstrap/{postgres,redis}/install.sh.
