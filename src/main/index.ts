@@ -434,12 +434,9 @@ function startLocalSupervisor(): void {
     onFailure: (_id, err) => void logFailure("supervisor_recover", err),
     authKey: async () => cachedIdentityPublicKey() ?? (await identityPublicKey()),
   });
-  // A force-quit leaves VMs running: stop them unless something already started.
-  if (setupSlot.claim()) {
-    void local
-      .launchCleanup((_id, err) => void logFailure("launch_cleanup", err))
-      .finally(() => setupSlot.release());
-  }
+  // A force-quit leaves VMs running: stop them unless something already started. Not under the setup slot:
+  // start/upgrade/remove wait for it inside LocalWorkspaces, so an early Start click is never refused as "busy".
+  void local.launchCleanup((_id, err) => void logFailure("launch_cleanup", err));
 }
 
 function registerIpcHandlers(): void {
@@ -620,6 +617,29 @@ function registerIpcHandlers(): void {
         return { ok: true, data: null };
       } catch (err) {
         return apiFailure(err, "remove_failed");
+      }
+    });
+  });
+
+  // Stop ONE local workspace (explicit user action): app stays open, data is kept, other workspaces are untouched.
+  // Same slot as start/remove so it can never race them.
+  ipcMain.handle("aw:stopLocalWorkspace", async (_e, id: string): Promise<ApiResult<null>> => {
+    if (!currentToken) return { ok: false, error: "session_lost" };
+    return scopedExclusive<ApiResult<null>>(setupSlot, sessionScope, BUSY, async () => {
+      const ws = local.registry.get(id);
+      if (!ws || ws.sub !== currentSub()) return { ok: false, error: "unknown_workspace" };
+      try {
+        if (shellLocalPort === ws.uiPort) {
+          shellWindow?.close();
+          shellWindow = null;
+          shellLocalPort = null;
+        }
+        await local.stop(id);
+        return { ok: true, data: null };
+      } catch (err) {
+        return apiFailure(err, "stop_failed");
+      } finally {
+        if (local.registry.get(id)) liveAuthWindow()?.webContents.send("aw:workspace-status", local_row(id));
       }
     });
   });

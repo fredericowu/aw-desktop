@@ -72,6 +72,38 @@ describe("shell window navigation policy", () => {
   });
 });
 
+describe("LocalWorkspaces.launchCleanup", () => {
+  it("makes a concurrent destroy wait for it instead of racing it (Start during cleanup is not refused)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "awd-cleanup-"));
+    const cfg = { podmanPath: "/p", homesRoot: join(root, ".awd"), dataRoot: join(root, "d"), tmpRoot: join(root, "t"), path: "/bin" };
+    const lw = new LocalWorkspaces(() => null, async () => undefined);
+    const registry = new LocalRegistry({ store: fileStore(join(root, "reg.json")), isPortFree: async () => true, newId: () => "localc" });
+    const events: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const runtime = new LocalRuntime(cfg, {
+      run: async (_c, args) => {
+        events.push(args.join(" "));
+        if (args[0] === "machine" && args[1] === "stop") await gate;
+        return { code: 0, stdout: args[1] === "list" ? "aw-localc true\n" : "", stderr: "" };
+      },
+    });
+    Object.assign(lw, { registry, runtime });
+    const w = await registry.create("s", "C");
+    runtime.prepare(w.id);
+    const cleanup = lw.launchCleanup();
+    await new Promise((r) => setTimeout(r, 10));
+    const destroy = lw.destroy(w.id);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(registry.get(w.id)).toBeDefined(); // still waiting on the cleanup
+    release();
+    await cleanup;
+    await destroy;
+    expect(registry.get(w.id)).toBeUndefined();
+    expect(events.some((e) => e.startsWith("machine stop"))).toBe(true);
+  });
+});
+
 describe("LocalWorkspaces.destroy", () => {
   it("removes the dirs and the registry entry, frees the ports, and leaves the other workspace alone", async () => {
     const root = mkdtempSync(join(tmpdir(), "awd-destroy-"));

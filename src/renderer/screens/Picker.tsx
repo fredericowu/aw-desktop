@@ -200,6 +200,11 @@ export function Picker({ state }: { state: AuthState }) {
                   <WorkspaceRow
                     key={ws.name}
                     ws={ws}
+                    onStop={window.aw.stopLocalWorkspace ? async () => {
+                      setNotice(null);
+                      const r = await window.aw.stopLocalWorkspace!(ws.name);
+                      if (!r.ok) setNotice(r.error ?? "Could not stop the workspace.");
+                    } : undefined}
                     onRemove={() => setRemoval({ ws, busy: false, error: null })}
                     removeDisabled={removal?.busy === true}
                     onUpgrade={() => setUpgrade({ ws, error: null })}
@@ -309,6 +314,7 @@ export function Picker({ state }: { state: AuthState }) {
 function WorkspaceRow({
   ws,
   onFinish,
+  onStop,
   onRemove,
   onUpgrade,
   removeDisabled,
@@ -316,6 +322,7 @@ function WorkspaceRow({
 }: {
   ws: WorkspaceInfo;
   onFinish: () => void;
+  onStop?: () => void;
   onRemove?: () => void;
   onUpgrade?: () => void;
   removeDisabled?: boolean;
@@ -340,6 +347,11 @@ function WorkspaceRow({
       {UPGRADE_COPY.title}
     </button>
   );
+  const stop = onStop && (
+    <button className="link" data-testid={`stop-${ws.name}`} aria-label={`Stop ${label0}`} disabled={removeDisabled} onClick={onStop}>
+      Stop
+    </button>
+  );
   const open = (
     <button className="secondary" onClick={() => window.aw.pickWorkspace(ws.name)}>
       {ws.display_name ?? ws.name}
@@ -352,6 +364,7 @@ function WorkspaceRow({
       <div className="workspace-row" data-testid={`here-${ws.name}`}>
         {open}
         <span className="dim">Runs on {thisDevice()}</span>
+        {stop}
         {upgrade}
         {remove}
       </div>

@@ -107,6 +107,8 @@ export interface AwBridge {
   upgradeLocalWorkspace(slug: string): Promise<ApiResult<null>>;
   /** Delete a local workspace and everything it owns (machine, containers, data, registry entry). */
   removeLocalWorkspace(slug: string): Promise<ApiResult<null>>;
+  /** Stop one running local workspace (machine and containers; data kept, app and other workspaces untouched). */
+  stopLocalWorkspace?(slug: string): Promise<ApiResult<null>>;
   getBootstrapProgress(): Promise<BootstrapProgress | null>;
   /** Settings > About asked to upgrade `slug`: open the confirm modal (nothing runs until the user confirms). Optional for older test bridges. */
   takePendingUpgrade?(): Promise<string | null>;

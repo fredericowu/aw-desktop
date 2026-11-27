@@ -16,6 +16,7 @@ const bridge: AwBridge = {
   finishLocalSetup: (slug) => ipcRenderer.invoke("aw:finishLocalSetup", slug),
   upgradeLocalWorkspace: (slug) => ipcRenderer.invoke("aw:upgradeLocalWorkspace", slug),
   removeLocalWorkspace: (slug) => ipcRenderer.invoke("aw:removeLocalWorkspace", slug),
+  stopLocalWorkspace: (slug) => ipcRenderer.invoke("aw:stopLocalWorkspace", slug),
   getBootstrapProgress: () => ipcRenderer.invoke("aw:getBootstrapProgress"),
   onBootstrapProgress: (cb: (p: BootstrapProgress) => void) => {
     const listener = (_event: unknown, next: BootstrapProgress) => cb(next);

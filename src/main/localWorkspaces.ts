@@ -95,6 +95,9 @@ export class LocalWorkspaces {
   private desktopBridge: ((id: string) => DesktopBridge) | null = null;
   private shuttingDown = false;
   private recovering: Promise<unknown> | null = null;
+  /** Launch cleanup in flight. It does NOT hold the setup slot (that made the first Start fail with a false
+   * "setup already running"); start/upgrade/destroy wait for it instead, so a click during it just queues. */
+  private cleanup: Promise<void> | null = null;
   /** Workspaces an upgrade has touched this session: its VM may be up without the workspace being in `running`. */
   private readonly upgraded = new Set<string>();
 
@@ -209,15 +212,26 @@ export class LocalWorkspaces {
   }
 
   /** Launch cleanup: a force-quit leaves VMs running. Stop only machines of registry workspaces (own HOME each). */
-  async launchCleanup(onError: (id: string, err: unknown) => void = () => undefined): Promise<void> {
-    for (const ws of this.registry.list()) {
-      if (this.running.has(ws.id)) continue;
-      try {
-        await this.runtime.stop(ws.id);
-      } catch (err) {
-        onError(ws.id, err);
+  launchCleanup(onError: (id: string, err: unknown) => void = () => undefined): Promise<void> {
+    const p = (async () => {
+      for (const ws of this.registry.list()) {
+        if (this.running.has(ws.id)) continue;
+        try {
+          await this.runtime.stop(ws.id);
+        } catch (err) {
+          onError(ws.id, err);
+        }
       }
-    }
+    })();
+    this.cleanup = p;
+    return p.finally(() => {
+      if (this.cleanup === p) this.cleanup = null;
+    });
+  }
+
+  /** Resolves once launch cleanup (if any) is done. Never rejects. */
+  private async cleanupSettled(): Promise<void> {
+    await this.cleanup?.catch(() => undefined);
   }
 
   isRunning(id: string): boolean {
@@ -257,6 +271,7 @@ export class LocalWorkspaces {
 
   /** Bring the machine, containers and front server up. Returns the (possibly port-bumped) record. */
   async start(id: string, authPublicKey: string, onStep: (s: BootstrapStepId) => void): Promise<LocalWorkspace> {
+    await this.cleanupSettled();
     // Retry after "needs attention": the core may still be running but hung, so use recovery rules.
     const recover = this.needsAttention(id);
     if (platformFor().id === "win32") {
@@ -280,7 +295,7 @@ export class LocalWorkspaces {
    */
   upgrade(id: string, authPublicKey: string, onStep: (s: BootstrapStepId) => void): Promise<void> {
     // Registered as the in-flight runtime operation so quit (stopAll) waits for it instead of stopping postgres/the VM under it.
-    const p = this.upgradeNow(id, authPublicKey, onStep);
+    const p = this.cleanupSettled().then(() => this.upgradeNow(id, authPublicKey, onStep));
     this.recovering = p;
     return p.finally(() => {
       if (this.recovering === p) this.recovering = null;
@@ -313,6 +328,7 @@ export class LocalWorkspaces {
   /** Remove one workspace completely: front server, containers, machine, dirs, then the registry entry.
    * The registry entry goes LAST so a failed cleanup stays visible and can be retried; ports free with it. */
   async destroy(id: string): Promise<void> {
+    await this.cleanupSettled();
     if (!this.registry.get(id)) return;
     await this.fronts.get(id)?.close();
     this.fronts.delete(id);
