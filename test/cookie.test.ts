@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("electron", () => ({ session: { defaultSession: { cookies: { set: vi.fn(), remove: vi.fn() }, webRequest: { onBeforeSendHeaders: vi.fn() } } } }));
 
-import { appHostCookie, withAppCookie } from "../src/main/cookie";
+import { appHostCookie, clearLocalIdentityCookies, injectLocalIdentityCookie, revokeAllLocalAppTokens, withAppCookie } from "../src/main/cookie";
 
 const tokens = new Map([[9031, "JWT"]]);
 
@@ -30,5 +30,19 @@ describe("withAppCookie", () => {
     expect(withAppCookie(undefined, "aw_id_jwt=T")).toBe("aw_id_jwt=T");
     expect(withAppCookie("a=1", "aw_id_jwt=T")).toBe("a=1; aw_id_jwt=T");
     expect(withAppCookie("a=1; aw_id_jwt=OLD", "aw_id_jwt=T")).toBe("a=1; aw_id_jwt=OLD");
+  });
+});
+
+describe("token lifecycle", () => {
+  it("clearLocalIdentityCookies([port]) and revokeAllLocalAppTokens drop the app-host token", async () => {
+    const url = "http://kali-linux.app.localhost:9055/";
+    await injectLocalIdentityCookie("T1", 9055);
+    await injectLocalIdentityCookie("T2", 9056);
+    expect(appHostCookie(url)).toBe("aw_id_jwt=T1");
+    await clearLocalIdentityCookies([9055]);
+    expect(appHostCookie(url)).toBeNull();
+    expect(appHostCookie("http://kali-linux.app.localhost:9056/")).toBe("aw_id_jwt=T2");
+    revokeAllLocalAppTokens(); // logout, even for a port no longer in the registry
+    expect(appHostCookie("http://kali-linux.app.localhost:9056/")).toBeNull();
   });
 });

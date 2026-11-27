@@ -45,6 +45,11 @@ export async function injectLocalIdentityCookie(token: string, uiPort: number): 
   });
 }
 
+/** Forget every app-host token (logout): independent of the registry, which may no longer list a removed workspace's port. */
+export function revokeAllLocalAppTokens(): void {
+  localTokens.clear();
+}
+
 export async function clearLocalIdentityCookies(ports: number[]): Promise<void> {
   for (const p of ports) localTokens.delete(p);
   await Promise.all(ports.map((p) => electronSession.defaultSession.cookies.remove(`http://127.0.0.1:${p}/`, COOKIE_NAME)));

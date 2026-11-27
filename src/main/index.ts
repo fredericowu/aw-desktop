@@ -4,7 +4,7 @@ import { APEX, CONSOLE_BASE, workspaceUrl } from "./config";
 import * as api from "./apiClient";
 import { ApiError } from "./apiClient";
 import { loadToken, saveToken, clearToken } from "./authStore";
-import { injectIdentityCookie, clearIdentityCookie, injectLocalIdentityCookie, clearLocalIdentityCookies } from "./cookie";
+import { injectIdentityCookie, clearIdentityCookie, injectLocalIdentityCookie, clearLocalIdentityCookies, revokeAllLocalAppTokens } from "./cookie";
 import { registerProtocolHandler, startGoogleSignInHandoff } from "./oauth";
 import { createAuthWindow, createShellWindow } from "./windows";
 import { checkForUpdates } from "./updater";
@@ -99,6 +99,7 @@ function teardownToLogin(error: string | null = null): void {
 function clearLocalCookies(): void {
   const ports = local.registry.list().map((w) => w.uiPort);
   shellLocalPort = null;
+  revokeAllLocalAppTokens();
   void clearLocalIdentityCookies(ports).catch(() => undefined);
 }
 
@@ -551,6 +552,8 @@ function registerIpcHandlers(): void {
           shellLocalPort = null;
         }
         await local.destroy(id);
+        // The port is released: its token must not outlive the workspace (the port can be reused).
+        void clearLocalIdentityCookies([ws.uiPort]).catch(() => undefined);
         if (bootstrapProgress?.slug === id) bootstrapProgress = null;
         return { ok: true, data: null };
       } catch (err) {
