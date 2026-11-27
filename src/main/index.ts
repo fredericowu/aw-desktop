@@ -55,6 +55,7 @@ let currentToken: string | null = null;
 
 let bootstrapProgress: BootstrapProgress | null = null;
 const setupSlot = new SetupSlot();
+const BUSY_MESSAGE = `A setup is already running on ${process.platform === "win32" ? "this PC" : "this Mac"}.`;
 /** A setup job belongs to the sign-in session that started it. */
 const sessionScope = new SessionScope();
 
@@ -508,6 +509,18 @@ function registerIpcHandlers(): void {
       const r = await window_startLocal(slug);
       return r;
     }
+    // A running LOCAL workspace opens under the setup slot, so it can never overlap a Stop (or remove/upgrade) of it.
+    if (lw) {
+      if (!setupSlot.claim()) return { ok: false, error: BUSY_MESSAGE };
+      try {
+        // Re-check inside the slot: a Stop that held it may have just finished.
+        if (!local.isRunning(slug)) return { ok: false, error: "workspace_not_running" };
+        const ok = await openWorkspace(slug);
+        return ok ? { ok: true } : { ok: false, error: state.openError?.message ?? "open_failed" };
+      } finally {
+        setupSlot.release();
+      }
+    }
     const ok = await openWorkspace(slug);
     return ok ? { ok: true } : { ok: false, error: state.openError?.message ?? "open_failed" };
   });
@@ -540,7 +553,7 @@ function registerIpcHandlers(): void {
     return true;
   });
 
-  const BUSY = { ok: false, error: `A setup is already running on ${process.platform === "win32" ? "this PC" : "this Mac"}.`, code: "bootstrap_running" } as const;
+  const BUSY = { ok: false, error: BUSY_MESSAGE, code: "bootstrap_running" } as const;
 
   // Cap is enforced HERE (main process), per signed-in account, before anything is created.
   ipcMain.handle("aw:createLocalWorkspace", async (_e, name: string): Promise<ApiResult<WorkspaceInfo>> => {

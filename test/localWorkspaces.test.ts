@@ -72,6 +72,24 @@ describe("shell window navigation policy", () => {
   });
 });
 
+describe("LocalWorkspaces.stop", () => {
+  it("keeps the workspace running (Stop stays retryable) when the shutdown fails, and clears it once a retry succeeds", async () => {
+    const lw = new LocalWorkspaces(() => null, async () => undefined);
+    const registry = new LocalRegistry({ store: fileStore(join(mkdtempSync(join(tmpdir(), "awd-stop-")), "reg.json")), isPortFree: async () => true, newId: () => "locals" });
+    const w = await registry.create("s", "S");
+    let fail = true;
+    Object.assign(lw, { registry, runtime: { stop: async () => { if (fail) throw new Error("podman stop failed"); } } });
+    (lw as unknown as { running: Set<string> }).running.add(w.id);
+    await expect(lw.stop(w.id)).rejects.toThrow(/podman stop failed/);
+    expect(lw.isRunning(w.id)).toBe(true);
+    expect(lw.rowsFor("s")[0].status).toBe("running");
+    fail = false;
+    await lw.stop(w.id);
+    expect(lw.isRunning(w.id)).toBe(false);
+    expect(lw.rowsFor("s")[0].status).toBe("stopped");
+  });
+});
+
 describe("LocalWorkspaces.launchCleanup", () => {
   it("makes a concurrent destroy wait for it instead of racing it (Start during cleanup is not refused)", async () => {
     const root = mkdtempSync(join(tmpdir(), "awd-cleanup-"));

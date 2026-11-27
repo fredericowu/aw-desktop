@@ -202,13 +202,17 @@ export class LocalWorkspaces {
   /** User-initiated stop of one workspace. Unwatched FIRST so the supervisor can never restart it. */
   async stop(id: string): Promise<void> {
     this.supervisor.unwatch(id);
-    await this.fronts.get(id)?.close();
-    this.fronts.delete(id);
     try {
       await this.runtime.stop(id);
-    } finally {
-      this.running.delete(id);
+    } catch (err) {
+      // Shutdown did not complete: the workspace may still be up, so it stays "running" (Stop remains offered for a
+      // retry), its front server stays open and the supervisor watches it again.
+      if (this.running.has(id)) this.supervisor.watch(id);
+      throw err;
     }
+    await this.fronts.get(id)?.close();
+    this.fronts.delete(id);
+    this.running.delete(id);
   }
 
   /** Launch cleanup: a force-quit leaves VMs running. Stop only machines of registry workspaces (own HOME each). */
