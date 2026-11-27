@@ -31,6 +31,8 @@ export async function clearIdentityCookie(): Promise<void> {
  * from the apex, so the identity JWT needs its own host-only cookie there. The front server
  * only passes it through; it never adds credentials itself. */
 export async function injectLocalIdentityCookie(token: string, uiPort: number): Promise<void> {
+  localTokens.set(uiPort, token);
+  installAppHostCookieHook();
   await electronSession.defaultSession.cookies.set({
     url: `http://127.0.0.1:${uiPort}/`,
     name: COOKIE_NAME,
@@ -43,6 +45,54 @@ export async function injectLocalIdentityCookie(token: string, uiPort: number): 
   });
 }
 
+/** Forget every app-host token (logout): independent of the registry, which may no longer list a removed workspace's port. */
+export function revokeAllLocalAppTokens(): void {
+  localTokens.clear();
+}
+
 export async function clearLocalIdentityCookies(ports: number[]): Promise<void> {
+  for (const p of ports) localTokens.delete(p);
   await Promise.all(ports.map((p) => electronSession.defaultSession.cookies.remove(`http://127.0.0.1:${p}/`, COOKIE_NAME)));
+}
+
+// Container-app windows (kali, code-server, ...) load from `<app>.app.localhost:<uiPort>`, another
+// site from the shell's 127.0.0.1. Measured on Chromium (Mac mini, Electron): a Domain=localhost or
+// Domain=.localhost cookie is NOT sent to `*.app.localhost`, and a SameSite=Lax cookie would not ride
+// the cross-site iframe anyway. So the identity JWT is attached to requests (HTTP + WebSocket) bound
+// for exactly `<app>.app.localhost:<uiPort>` of an open local workspace, and never stored for them.
+const localTokens = new Map<number, string>();
+const APP_HOST = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.app\.localhost$/;
+
+/** The Cookie header value to add for a request URL, or null when it is not an app host of an open local workspace. */
+export function appHostCookie(rawUrl: string, tokens: ReadonlyMap<number, string> = localTokens): string | null {
+  let u: URL;
+  try {
+    u = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "ws:") return null;
+  if (!APP_HOST.test(u.hostname)) return null;
+  const token = tokens.get(Number(u.port));
+  return token ? `${COOKIE_NAME}=${token}` : null;
+}
+
+/** Merge into an existing Cookie header without clobbering it; a cookie the page already sent wins. */
+export function withAppCookie(existing: string | undefined, add: string): string {
+  if (!existing) return add;
+  return existing.split(";").some((c) => c.trim().startsWith(`${COOKIE_NAME}=`)) ? existing : `${existing}; ${add}`;
+}
+
+let hookInstalled = false;
+function installAppHostCookieHook(): void {
+  if (hookInstalled) return;
+  hookInstalled = true;
+  electronSession.defaultSession.webRequest.onBeforeSendHeaders({ urls: ["http://*.app.localhost/*", "ws://*.app.localhost/*"] }, (details, cb) => {
+    const add = appHostCookie(details.url);
+    if (!add) return cb({});
+    const headers = { ...details.requestHeaders };
+    const key = Object.keys(headers).find((k) => k.toLowerCase() === "cookie");
+    headers[key ?? "Cookie"] = withAppCookie(key ? headers[key] : undefined, add);
+    cb({ requestHeaders: headers });
+  });
 }

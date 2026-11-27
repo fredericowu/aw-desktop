@@ -162,6 +162,51 @@ describe("websocket", () => {
   });
 });
 
+describe("app subdomain hosts (Tier-2 container-app windows)", () => {
+  const appHost = () => `kali-linux.app.localhost:${uiPort}`;
+  it("proxies ANY path with the Host preserved, credentials untouched", async () => {
+    const r = await get(uiPort, "/vnc/index.html?x=1", { host: appHost(), headers: { cookie: "aw_id_jwt=abc" } });
+    expect(r.status).toBe(201);
+    expect(seen.url).toBe("/vnc/index.html?x=1");
+    expect(seen.headers.host).toBe(appHost());
+    expect(seen.headers.cookie).toBe("aw_id_jwt=abc");
+  });
+  it("tunnels a WebSocket upgrade on any path when Origin is the same app host", async () => {
+    const r = await upgrade(uiPort, "/websockify", { host: appHost(), origin: `http://${appHost()}` });
+    expect(r).toEqual({ status: 101, echo: "ping" });
+    expect(seen.headers.host).toBe(appHost());
+  });
+  it("also accepts the SPA origin on an app-host upgrade", async () => {
+    expect((await upgrade(uiPort, "/websockify", { host: appHost(), origin: `http://127.0.0.1:${uiPort}` })).status).toBe(101);
+  });
+  it.each(["http://evil.com", "http://other.app.localhost:" + 1, "http://kali-linux.app.localhost", "", "null"])("rejects app-host upgrade with Origin %s", async (o) => {
+    const before = seen.upgraded;
+    const h: Record<string, string> = { host: appHost() };
+    if (o) h.origin = o;
+    expect((await upgrade(uiPort, "/websockify", h)).status).toBe(403);
+    expect(seen.upgraded).toBe(before);
+  });
+  it.each([
+    "kali-linux.app.localhost", // no port
+    "kali-linux.app.localhost:1", // wrong port
+    "kali-linux.app.127.0.0.1:PORT",
+    "kali-linux.app.localhost.evil.com:PORT", // DNS rebinding shape
+    "kali-linux.app.localhost:PORT.evil.com",
+    "evil.com:PORT",
+    "a.b.app.localhost:PORT", // multi-label app id
+    ".app.localhost:PORT",
+    "-x.app.localhost:PORT",
+    "app.localhost:PORT",
+    "kali-linux.app.localhost:PORT@evil.com",
+  ])("keeps 421 for Host %s (DNS-rebinding negatives)", async (h) => {
+    const host = h.replace("PORT", String(uiPort));
+    const before = seen.url;
+    expect((await get(uiPort, "/x", { host })).status).toBe(421);
+    expect(seen.url).toBe(before);
+    expect((await upgrade(uiPort, "/websockify", { host, origin: `http://${host}` })).status).toBe(421);
+  });
+});
+
 describe("static", () => {
   it("serves files with a content type", async () => {
     const r = await get(uiPort, "/assets/app.js");
