@@ -16,7 +16,15 @@ import type { Socket } from "node:net";
 import { createReadStream, statSync } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
 
+/** Answers /desktop/v1/* locally (never proxied). The upgrade hook only OPENS the Picker's confirm modal. */
+export interface DesktopBridge {
+  about(): Promise<unknown>;
+  requestUpgrade(): { status: number; body: Record<string, unknown> };
+}
+
 export interface FrontServerOptions {
+  /** Optional desktop bridge; absent = /desktop/v1/* is just an unknown static path. */
+  desktop?: DesktopBridge;
   uiPort: number;
   apiPort: number;
   /** Directory holding the built SPA (index.html at its root). May be absent: static requests then 404. */
@@ -55,6 +63,13 @@ export const allowedOrigins = (uiPort: number): string[] => [`http://127.0.0.1:$
 
 /** `<app>.app.localhost:<uiPort>`: one DNS label for the app id, exact port, nothing else. */
 export const appHostRe = (uiPort: number): RegExp => new RegExp(`^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\\.app\\.localhost:${uiPort}$`);
+
+const isDesktopApi = (path: string) => path === "/desktop/v1" || path.startsWith("/desktop/v1/");
+
+function sendJson(res: ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+  res.end(JSON.stringify(body));
+}
 
 const isProxied = (path: string) => path === "/api" || path.startsWith("/api/") || path === "/ws" || path.startsWith("/ws/");
 
@@ -142,11 +157,33 @@ export function createFrontServer(opts: FrontServerOptions): FrontServer {
     req.pipe(up);
   }
 
+  async function handleDesktop(req: IncomingMessage, res: ServerResponse, pathname: string, bridge: DesktopBridge): Promise<void> {
+    try {
+      if (pathname === "/desktop/v1/about") {
+        if (req.method !== "GET") return sendJson(res, 405, { error: "method_not_allowed" });
+        return sendJson(res, 200, { kind: "aw-desktop", ...((await bridge.about()) as object) });
+      }
+      if (pathname === "/desktop/v1/upgrade") {
+        if (req.method !== "POST") return sendJson(res, 405, { error: "method_not_allowed" });
+        const origin = req.headers.origin;
+        if (typeof origin !== "string" || !origins.has(origin.toLowerCase())) return sendJson(res, 403, { error: "forbidden_origin" });
+        if (!(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) return sendJson(res, 415, { error: "json_required" });
+        req.resume();
+        const r = bridge.requestUpgrade();
+        return sendJson(res, r.status, r.body);
+      }
+      sendJson(res, 404, { error: "not_found" });
+    } catch {
+      if (!res.headersSent) sendJson(res, 500, { error: "desktop_bridge_failed" });
+    }
+  }
+
   const server = createServer((req, res) => {
     if (!hostOk(req)) return sendText(res, 421, "misdirected request");
     const pathname = new URL(req.url ?? "/", "http://x").pathname;
     if (isAppHost(req)) return proxyHttp(req, res, true);
     if (isProxied(pathname)) return proxyHttp(req, res);
+    if (opts.desktop && isDesktopApi(pathname)) return void handleDesktop(req, res, pathname, opts.desktop);
     serveStatic(req, res, pathname);
   });
 

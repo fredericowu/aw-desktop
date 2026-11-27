@@ -13,6 +13,7 @@ const ws = (over: Partial<WorkspaceInfo>): WorkspaceInfo => ({
   status: "stopped",
   ...over,
 });
+let emitUpgradeRequest: (slug: string) => void = () => undefined;
 let emitProgress: (p: BootstrapProgress) => void = () => undefined;
 function bridge(over: Partial<AwBridge> & { workspaces?: WorkspaceInfo[]; localCount?: number } = {}) {
   const { workspaces = [], localCount, ...rest } = over;
@@ -33,6 +34,7 @@ function bridge(over: Partial<AwBridge> & { workspaces?: WorkspaceInfo[]; localC
     removeLocalWorkspace: vi.fn(async () => ({ ok: true, data: null })),
     upgradeLocalWorkspace: vi.fn(async (): Promise<ApiResult<null>> => ({ ok: true, data: null })),
     getBootstrapProgress: vi.fn(async (): Promise<BootstrapProgress | null> => null),
+    onUpgradeRequested: vi.fn((cb: (slug: string) => void) => ((emitUpgradeRequest = cb), () => undefined)),
     onBootstrapProgress: vi.fn((cb: (p: BootstrapProgress) => void) => {
       emitProgress = cb;
       return () => undefined;
@@ -484,6 +486,16 @@ describe("Upgrade local workspace", () => {
     render(<Picker state={state} />);
     await screen.findByTestId("starting-localaaa");
     expect(screen.queryByTestId("upgrade-localaaa")).toBeNull();
+  });
+
+  it("an About-initiated request opens the confirm modal and runs nothing", async () => {
+    const b = bridge({ workspaces: [old(), ws({ name: "localbbb", status: "running" })] });
+    render(<Picker state={state} />);
+    await screen.findByTestId("upgrade-localaaa");
+    emitUpgradeRequest("localbbb"); // current workspace: ignored
+    emitUpgradeRequest("localaaa");
+    await screen.findByTestId("upgrade-modal");
+    expect(b.upgradeLocalWorkspace).not.toHaveBeenCalled();
   });
 
   it("is explicit: clicking only opens a confirmation, nothing runs until it is confirmed; Cancel runs nothing", async () => {

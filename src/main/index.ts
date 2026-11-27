@@ -13,7 +13,9 @@ import { preflight } from "./preflight";
 import { classifyError, looksLikeEngineText, type ClassifiedError } from "./errorClassifier";
 import { appendDiagnostic, readDiagnosticTail } from "./diagnostics";
 import { platformFor } from "./enginePlatform";
-import { PodmanCommandError, UpgradeFailedError, upgradeAvailable } from "./localRuntime";
+import { PodmanCommandError, UpgradeFailedError, WORKSPACE_IMAGE, pinnedImage, upgradeAvailable } from "./localRuntime";
+import { WINDOWS_VM, hostFacts, parseMachineInspect, VM_DEFAULTS, type VmFacts } from "./aboutFacts";
+import { readFileSync } from "node:fs";
 import { LocalWorkspaces, cachedIdentityPublicKey, identityPublicKey } from "./localWorkspaces";
 import { createBannerView } from "./bannerView";
 import { RecoveryBanner } from "./recoveryBanner";
@@ -358,6 +360,53 @@ async function window_startLocal(id: string): Promise<{ ok: boolean; error?: str
   return r;
 }
 
+/** Bundled build identifiers written by scripts/fetch-ui.sh (public ids only). Absent in dev builds. */
+function readBuildInfo(): { uiCommit?: string; coreImage?: string; tag?: string } {
+  try {
+    return JSON.parse(readFileSync(join(process.resourcesPath ?? "", "build-info.json"), "utf8")) as { uiCommit?: string; coreImage?: string; tag?: string };
+  } catch {
+    return {};
+  }
+}
+
+/** Loopback /desktop/v1/* bridge for one local workspace (Settings > About). Reads only; the upgrade hook merely
+ * asks the Picker to open its existing confirm modal, so a forged request can never start an upgrade. */
+function desktopBridge(id: string) {
+  return {
+    async about() {
+      const ws = local.registry.get(id);
+      const supported = platformFor().supportsUpgrade;
+      let vm: VmFacts = { state: "unknown", reason: "no workspace record" };
+      if (supported) {
+        vm = await local.runtime.machineInspect(id).then(parseMachineInspect, () => ({ state: "ok", ...VM_DEFAULTS, source: "default" }) as VmFacts);
+      } else {
+        vm = WINDOWS_VM;
+      }
+      return {
+        app_version: app.getVersion(),
+        build: readBuildInfo(),
+        workspace: ws
+          ? { id, pinned_image: pinnedImage(ws), bundled_image: WORKSPACE_IMAGE, upgrade_available: upgradeAvailable(ws), upgrade_supported: supported }
+          : null,
+        vm,
+        host: await hostFacts(join(app.getPath("home"), "aw-workspaces")),
+      };
+    },
+    requestUpgrade(): { status: number; body: Record<string, unknown> } {
+      const ws = local.registry.get(id);
+      if (!ws || ws.sub !== currentSub() || !currentToken) return { status: 403, body: { error: "unknown_workspace" } };
+      if (!platformFor().supportsUpgrade) return { status: 409, body: { error: "upgrade_unsupported" } };
+      if (!upgradeAvailable(ws)) return { status: 409, body: { error: "already_current" } };
+      if (setupSlot.isBusy) return { status: 409, body: { error: "busy" } };
+      if (!authWindow || authWindow.isDestroyed()) authWindow = createAuthWindow();
+      authWindow.show();
+      authWindow.focus();
+      authWindow.webContents.send("aw:request-upgrade", id);
+      return { status: 202, body: { ok: true } };
+    },
+  };
+}
+
 /** Supervisor wiring: recovery runs inside the setup slot (never races Remove or a start), failures go to the log. */
 function startLocalSupervisor(): void {
   local.startSupervisor({
@@ -638,6 +687,7 @@ app.whenReady().then(async () => {
     void local.checkNow();
     void checkForUpdates();
   });
+  local.setDesktopBridge(desktopBridge);
   startLocalSupervisor();
   void refreshLoop();
   void checkForUpdates();
