@@ -5,7 +5,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { API_BASE } from "./config";
-import { createFrontServer, type FrontServer } from "./frontServer";
+import { createFrontServer, type DesktopBridge, type FrontServer } from "./frontServer";
 import { fileStore, LocalRegistry, probeLoopbackPortBothFamilies, registryPath, type LocalWorkspace } from "./localRegistry";
 import { ensureWslConfig } from "./wslConfig";
 import { LocalRuntime, PortConflictError, upgradeAvailable, type RuntimeConfig, type StartOptions } from "./localRuntime";
@@ -92,6 +92,7 @@ export class LocalWorkspaces {
   private readonly supervisor: Supervisor;
   private timer: ReturnType<typeof setInterval> | null = null;
   private hooks: SupervisorHooks | null = null;
+  private desktopBridge: ((id: string) => DesktopBridge) | null = null;
   private shuttingDown = false;
   private recovering: Promise<unknown> | null = null;
   /** Workspaces an upgrade has touched this session: its VM may be up without the workspace being in `running`. */
@@ -120,6 +121,11 @@ export class LocalWorkspaces {
     });
   }
 
+  /** Per-workspace /desktop/v1/* bridge for the Settings > About tab. Set once at app ready, before any front server starts. */
+  setDesktopBridge(factory: (id: string) => DesktopBridge): void {
+    this.desktopBridge = factory;
+  }
+
   /** Begin polling health of every running workspace. Call once at app ready. */
   startSupervisor(hooks: SupervisorHooks, pollMs = SUPERVISOR_POLL_MS): void {
     this.hooks = hooks;
@@ -139,6 +145,10 @@ export class LocalWorkspaces {
     });
   }
 
+  private desktopOpt(id: string): { desktop?: DesktopBridge } {
+    return this.desktopBridge ? { desktop: this.desktopBridge(id) } : {};
+  }
+
   private async recoverNow(id: string): Promise<RecoverOutcome> {
     const hooks = this.hooks;
     const ws = this.registry.get(id);
@@ -153,7 +163,7 @@ export class LocalWorkspaces {
       // The saved port was taken meanwhile and the workspace moved: the front server still proxies to the old one.
       if (this.running.has(id) && (moved.apiPort !== ws.apiPort || moved.uiPort !== ws.uiPort)) {
         await this.fronts.get(id)?.close();
-        const front = createFrontServer({ uiPort: moved.uiPort, apiPort: moved.apiPort, staticDir: uiStaticDir() });
+        const front = createFrontServer({ uiPort: moved.uiPort, apiPort: moved.apiPort, staticDir: uiStaticDir(), ...this.desktopOpt(id) });
         await front.listen();
         this.fronts.set(id, front);
       }
@@ -254,7 +264,7 @@ export class LocalWorkspaces {
     }
     const workspace = await this.startWithPortRetry(id, { authPublicKey, recover, onStep: (s) => onStep(stepFor(s)) });
     await this.fronts.get(id)?.close();
-    const front = createFrontServer({ uiPort: workspace.uiPort, apiPort: workspace.apiPort, staticDir: uiStaticDir() });
+    const front = createFrontServer({ uiPort: workspace.uiPort, apiPort: workspace.apiPort, staticDir: uiStaticDir(), ...this.desktopOpt(id) });
     await front.listen();
     this.fronts.set(id, front);
     this.running.add(id);

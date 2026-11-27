@@ -13,7 +13,9 @@ import { preflight } from "./preflight";
 import { classifyError, looksLikeEngineText, type ClassifiedError } from "./errorClassifier";
 import { appendDiagnostic, readDiagnosticTail } from "./diagnostics";
 import { platformFor } from "./enginePlatform";
-import { PodmanCommandError, UpgradeFailedError, upgradeAvailable } from "./localRuntime";
+import { PodmanCommandError, UpgradeFailedError, WORKSPACE_IMAGE, pinnedImage, upgradeAvailable } from "./localRuntime";
+import { WINDOWS_VM, hostFacts, vmFactsFromInspect, type VmFacts } from "./aboutFacts";
+import { readFileSync } from "node:fs";
 import { LocalWorkspaces, cachedIdentityPublicKey, identityPublicKey } from "./localWorkspaces";
 import { createBannerView } from "./bannerView";
 import { RecoveryBanner } from "./recoveryBanner";
@@ -65,6 +67,8 @@ let shellLocalPort: number | null = null;
 /** Account key for the per-account cap: the identity user id. */
 const currentSub = (): string => String(state.user?.id ?? "");
 
+/** Workspace id whose About-initiated upgrade dialog the Picker has not yet claimed. */
+let pendingUpgrade: string | null = null;
 let state: AuthState = { stage: "splash", user: null, error: null, apex: APEX, openError: null, storageWarning: null };
 
 /** macOS keeps the app alive after the picker window is closed, leaving
@@ -358,6 +362,59 @@ async function window_startLocal(id: string): Promise<{ ok: boolean; error?: str
   return r;
 }
 
+/** Bundled build identifiers written by scripts/fetch-ui.sh (public ids only). Absent in dev builds. */
+function readBuildInfo(): { uiCommit?: string; coreImage?: string; tag?: string } {
+  try {
+    return JSON.parse(readFileSync(join(process.resourcesPath ?? "", "build-info.json"), "utf8")) as { uiCommit?: string; coreImage?: string; tag?: string };
+  } catch {
+    return {};
+  }
+}
+
+/** Loopback /desktop/v1/* bridge for one local workspace (Settings > About). Reads only; the upgrade hook merely
+ * asks the Picker to open its existing confirm modal, so a forged request can never start an upgrade. */
+function desktopBridge(id: string) {
+  return {
+    async about() {
+      const ws = local.registry.get(id);
+      const supported = platformFor().supportsUpgrade;
+      let vm: VmFacts = { state: "unknown", reason: "no workspace record" };
+      if (supported) {
+        vm = await vmFactsFromInspect(local.runtime.machineInspect(id));
+      } else {
+        vm = WINDOWS_VM;
+      }
+      return {
+        app_version: app.getVersion(),
+        build: readBuildInfo(),
+        workspace: ws
+          ? { id, pinned_image: pinnedImage(ws), bundled_image: WORKSPACE_IMAGE, upgrade_available: upgradeAvailable(ws), upgrade_supported: supported }
+          : null,
+        vm,
+        host: await hostFacts(join(app.getPath("home"), "aw-workspaces")),
+      };
+    },
+    requestUpgrade(): { status: number; body: Record<string, unknown> } {
+      const ws = local.registry.get(id);
+      if (!ws || ws.sub !== currentSub() || !currentToken) return { status: 403, body: { error: "unknown_workspace" } };
+      if (!platformFor().supportsUpgrade) return { status: 409, body: { error: "upgrade_unsupported" } };
+      if (!upgradeAvailable(ws)) return { status: 409, body: { error: "already_current" } };
+      if (setupSlot.isBusy) return { status: 409, body: { error: "busy" } };
+      // The Picker may not be mounted (workspace open leaves "loading-workspace", a closed window is recreated):
+      // park the request in main, move to the Picker, and let it claim the request once it has mounted.
+      const alive = liveAuthWindow();
+      const pickerLive = !!alive && state.stage === "picker" && !alive.webContents.isLoading();
+      pendingUpgrade = id;
+      if (!alive) authWindow = createAuthWindow();
+      if (state.stage !== "picker") setState({ stage: "picker", user: state.user, error: null, openError: null });
+      authWindow!.show();
+      authWindow!.focus();
+      if (pickerLive) authWindow!.webContents.send("aw:request-upgrade", id);
+      return { status: 202, body: { ok: true } };
+    },
+  };
+}
+
 /** Supervisor wiring: recovery runs inside the setup slot (never races Remove or a start), failures go to the log. */
 function startLocalSupervisor(): void {
   local.startSupervisor({
@@ -387,6 +444,11 @@ function startLocalSupervisor(): void {
 
 function registerIpcHandlers(): void {
   ipcMain.handle("aw:getState", () => state);
+  ipcMain.handle("aw:takePendingUpgrade", () => {
+    const id = pendingUpgrade;
+    pendingUpgrade = null;
+    return id;
+  });
   ipcMain.on("aw:banner-retry", (e) => {
     // Only the banner view itself may trigger it, never the hosted workspace page.
     if (bannerContentsId !== null && bannerContentsId === e.sender.id) void recoveryBanner?.retry();
@@ -638,6 +700,7 @@ app.whenReady().then(async () => {
     void local.checkNow();
     void checkForUpdates();
   });
+  local.setDesktopBridge(desktopBridge);
   startLocalSupervisor();
   void refreshLoop();
   void checkForUpdates();

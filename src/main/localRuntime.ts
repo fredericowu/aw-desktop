@@ -535,6 +535,10 @@ export class LocalRuntime {
   }
 
   // ---- machine lifecycle ----
+  /** Raw `podman machine inspect` stdout for the About bridge. Throws on a non-zero exit. */
+  async machineInspect(id: string): Promise<string> {
+    return (await this.machineCmd(id, ["machine", "inspect", machineName(id)], 15_000)).stdout;
+  }
   async machineExists(id: string): Promise<boolean> {
     const r = await this.machineCmd(id, ["machine", "list", "--format", "{{.Name}}"]);
     return r.stdout.split("\n").some((l) => l.trim().replace(/\*$/, "") === machineName(id));

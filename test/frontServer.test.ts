@@ -236,3 +236,59 @@ describe("static", () => {
     expect((await get(uiPort, "/", { method: "POST" })).status).toBe(405);
   });
 });
+
+describe("desktop bridge (/desktop/v1)", () => {
+  let dPort: number;
+  let dFront: FrontServer;
+  let requested = 0;
+  beforeAll(async () => {
+    dPort = await freePort();
+    dFront = createFrontServer({
+      uiPort: dPort,
+      apiPort,
+      staticDir: join(dir, "ui"),
+      desktop: {
+        about: async () => ({ app_version: "1.2.3" }),
+        requestUpgrade: () => {
+          requested++;
+          return { status: 202, body: { ok: true } };
+        },
+      },
+    });
+    await dFront.listen();
+  });
+  afterAll(async () => {
+    await dFront.close();
+  });
+  const origin = () => `http://127.0.0.1:${dPort}`;
+
+  it("GET about answers JSON with kind aw-desktop, no-store", async () => {
+    const r = await get(dPort, "/desktop/v1/about");
+    expect(r.status).toBe(200);
+    expect(r.headers["content-type"]).toContain("application/json");
+    expect(r.headers["cache-control"]).toBe("no-store");
+    expect(JSON.parse(r.body)).toEqual({ kind: "aw-desktop", app_version: "1.2.3" });
+  });
+  it("wrong Host is 421", async () => {
+    expect((await get(dPort, "/desktop/v1/about", { host: "evil.com" })).status).toBe(421);
+  });
+  it("is not answered on an app host (proxied to the core instead)", async () => {
+    const r = await get(dPort, "/desktop/v1/about", { host: `kali.app.localhost:${dPort}` });
+    expect(r.status).toBe(201);
+  });
+  it("POST upgrade: wrong Origin 403, missing JSON type 415, nothing requested", async () => {
+    expect((await get(dPort, "/desktop/v1/upgrade", { method: "POST", headers: { origin: "http://evil.com", "content-type": "application/json" }, body: "{}" })).status).toBe(403);
+    expect((await get(dPort, "/desktop/v1/upgrade", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status).toBe(403);
+    expect((await get(dPort, "/desktop/v1/upgrade", { method: "POST", headers: { origin: origin(), "content-type": "text/plain" }, body: "x" })).status).toBe(415);
+    expect(requested).toBe(0);
+  });
+  it("POST upgrade with the loopback Origin asks to open the modal (202)", async () => {
+    const r = await get(dPort, "/desktop/v1/upgrade", { method: "POST", headers: { origin: origin(), "content-type": "application/json" }, body: "{}" });
+    expect(r.status).toBe(202);
+    expect(requested).toBe(1);
+  });
+  it("without a bridge the path is plain static (SPA html), not JSON", async () => {
+    const r = await get(uiPort, "/desktop/v1/about");
+    expect(r.headers["content-type"]).toContain("text/html");
+  });
+});

@@ -51,6 +51,18 @@ export function Picker({ state }: { state: AuthState }) {
     void window.aw.getBootstrapProgress().then((p) => p && p.phase !== "done" && setProgress(p));
     return window.aw.onBootstrapProgress(setProgress);
   }, []);
+  // Settings > About asks for an upgrade: only OPEN the existing confirm modal (it runs nothing by itself).
+  const [upgradeRequest, setUpgradeRequest] = useState<string | null>(null);
+  useEffect(() => {
+    void window.aw.takePendingUpgrade?.().then((id) => id && setUpgradeRequest(id));
+    return window.aw.onUpgradeRequested?.(setUpgradeRequest);
+  }, []);
+  useEffect(() => {
+    if (!upgradeRequest || load.phase !== "ready") return;
+    const target = load.workspaces.find((w) => w.name === upgradeRequest && w.upgrade_available);
+    if (target) setUpgrade({ ws: target, error: null });
+    setUpgradeRequest(null);
+  }, [upgradeRequest, load]);
   // Supervisor recovery changes a row's status without any user action: merge the row main sends.
   useEffect(() => {
     return window.aw.onWorkspaceStatus?.((row) => {
